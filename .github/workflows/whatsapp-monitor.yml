@@ -7,7 +7,11 @@ name: WhatsApp monitor
 
 on:
   schedule:
-    - cron: "0 */2 * * *"    # every 2 hours (GitHub may delay/skip under load)
+    # All crons are UTC; IST = UTC+5:30. GitHub may delay/skip under load.
+    - cron: "*/30 4-14 * * *"   # every 30 min, 09:30-20:00 IST (peak hours)
+    - cron: "30 14-18 * * *"    # hourly, 20:00-00:00 IST (evening wind-down)
+    - cron: "30 0-3 * * *"      # hourly, 06:00-09:00 IST (morning ramp-up)
+    #                             nothing 00:00-06:00 IST (overnight quiet)
   workflow_dispatch: {}       # manual "Run workflow" button
 
 concurrency:                  # never let two runs fight over the state cache
