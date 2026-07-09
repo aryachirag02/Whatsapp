@@ -7,7 +7,7 @@ name: WhatsApp monitor
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # ~every 10 min (GitHub may delay/skip under load)
+    - cron: "0 */2 * * *"    # every 2 hours (GitHub may delay/skip under load)
   workflow_dispatch: {}       # manual "Run workflow" button
 
 concurrency:                  # never let two runs fight over the state cache
@@ -37,6 +37,7 @@ jobs:
             state.json
             group_list_cache.json
             ai_summaries.json
+            attendee_maps.json
           key: wa-state-${{ github.run_id }}
           restore-keys: |
             wa-state-
@@ -84,6 +85,7 @@ jobs:
             state.json
             group_list_cache.json
             ai_summaries.json
+            attendee_maps.json
           key: wa-state-${{ github.run_id }}
 
       # Master at "/", each team at its own clean path (/sat, /ap, ...).
