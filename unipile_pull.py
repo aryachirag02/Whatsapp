@@ -80,7 +80,7 @@ def list_group_chats(acct):
             chats.append((c["id"], c["name"], ts))
         cursor = data.get("cursor")
         if not cursor: break
-        time.sleep(0.3)
+        time.sleep(0.12)
     print(f"  chats scanned={total} named groups={named} "
           f"(excluded internal={excl}, stale>{LOOKBACK_DAYS}d={stale}) -> starting list={len(chats)}")
     return chats
@@ -156,7 +156,7 @@ def pull_messages(chat_id, name, amap, since, acct):
                         "text": text if STORE_TEXT else ""})
         cursor = data.get("cursor")
         if stop or not cursor: break
-        time.sleep(0.3)
+        time.sleep(0.12)
     return out
 
 def ckey(r):
@@ -186,6 +186,11 @@ def main():
     store = load_store()
     directory = load_directory()
     have_store = len(store) > 0
+    # attendee lists rarely change -> cache per group, refresh weekly
+    AMP = os.path.join(here, "attendee_maps.json")
+    try: amcache = json.load(open(AMP))
+    except Exception: amcache = {}
+    AM_TTL = 7 * 86400
 
     incr = bool(last_run and have_store)
     overlap = (last_run - timedelta(minutes=OVERLAP_MIN)) if incr else cutoff
@@ -216,13 +221,18 @@ def main():
     fetched = 0
     for i, (acct, gid, name, gsince) in enumerate(todo, 1):
         try:
-            amap = attendee_map(gid, directory)
+            ent = amcache.get(gid)
+            if ent and (time.time() - ent.get("ts", 0)) < AM_TTL:
+                amap = ent["amap"]                 # cached -> no API call
+            else:
+                amap = attendee_map(gid, directory)
+                amcache[gid] = {"amap": amap, "ts": time.time()}
             for r in pull_messages(gid, name, amap, gsince, acct):
                 store[ckey(r)] = r; fetched += 1
         except Exception as e:
             print(f"  ! {name}: {e}", flush=True)
         if i % 25 == 0: print(f"  {i}/{len(todo)} groups...", flush=True)
-        time.sleep(0.2)
+        time.sleep(0.05)
 
     # prune to rolling window
     recs = [r for r in store.values() if (parse_ts(r.get("timestamp")) or now) >= cutoff]
@@ -232,6 +242,7 @@ def main():
               ensure_ascii=False, indent=1)
     directory["self_phones"] = sorted(directory["self_phones"])
     json.dump(directory, open(DIRP, "w"), ensure_ascii=False, indent=1)
+    json.dump(amcache, open(AMP, "w"))
     json.dump({"last_run": now.isoformat()}, open(STATE, "w"), indent=1)
     print(f"Fetched {fetched} new/updated; store now {len(recs)} messages (14d) "
           f"from {len({r['group_id'] for r in recs})} groups -> messages_latest.json")
