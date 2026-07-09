@@ -1,0 +1,98 @@
+# .github/workflows/whatsapp-monitor.yml
+# Every ~30 min: pull WhatsApp (read-only) -> build master + 5 team dashboards
+# (AI summaries inline, cached) -> deploy to Cloudflare Pages (password-gated).
+# Public repo => Actions minutes are free & unlimited.
+
+name: WhatsApp monitor
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # ~every 30 min (GitHub may delay/skip under load)
+  workflow_dispatch: {}       # manual "Run workflow" button
+
+concurrency:                  # never let two runs fight over the state cache
+  group: whatsapp-monitor
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Carry the rolling store + AI summary cache between runs so the pull
+      # stays incremental and unchanged threads never re-hit the AI API.
+      - name: Restore state from previous run
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            messages_latest.json
+            attendees.json
+            state.json
+            group_list_cache.json
+            ai_summaries.json
+          key: wa-state-${{ github.run_id }}
+          restore-keys: |
+            wa-state-
+
+      # API key arrives via env (not inlined) so it never lands in the rendered
+      # command; GitHub masks it in logs. dsn + account_id aren't credentials.
+      - name: Write config.json
+        env:
+          UNIPILE_API_KEY: ${{ secrets.UNIPILE_API_KEY }}
+        run: |
+          cat > config.json <<EOF
+          {
+            "api_key": "${UNIPILE_API_KEY}",
+            "dsn": "https://api49.unipile.com:17927",
+            "account_id": "KNO4Re-iTGSUBtC9OWhP5Q",
+            "lookback_days": 14,
+            "exclude_keywords": ["coordination","content","grading","internal","team","staff","accounts","tracking","tech issues","payglocal","non sat"]
+          }
+          EOF
+
+      - name: Pull messages (READ-ONLY)
+        run: python unipile_pull.py
+
+      - name: Build dashboards (master + 5 teams; AI summaries inline, cached)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python report_engine.py
+
+      - name: Save state for next run
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            messages_latest.json
+            attendees.json
+            state.json
+            group_list_cache.json
+            ai_summaries.json
+          key: wa-state-${{ github.run_id }}
+
+      # Master at "/", each team at its own clean path (/sat, /ap, ...).
+      - name: Stage site (master + 5 team dashboards + auth worker)
+        run: |
+          mkdir -p _site
+          cp dashboard.html        _site/index.html
+          cp dashboard_sat.html    _site/sat.html
+          cp dashboard_ap.html     _site/ap.html
+          cp dashboard_ib.html     _site/ib.html
+          cp dashboard_igcse.html  _site/igcse.html
+          cp dashboard_myp.html    _site/myp.html
+          cp dashboard_else.html   _site/else.html
+          cp _worker.js            _site/_worker.js
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy _site --project-name=apguru-whatsapp --branch=main
