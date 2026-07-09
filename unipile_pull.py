@@ -21,7 +21,7 @@ here = os.path.dirname(os.path.abspath(__file__))
 cfg  = json.load(open(os.path.join(here, "config.json")))
 API = (os.environ.get("UNIPILE_API_KEY") or cfg.get("api_key", "")).strip()
 DSN = cfg["dsn"].rstrip("/")
-print(f"auth check: key length={len(API)} | dsn={DSN}")
+print(f"auth check: key length={len(API)} | dsn={DSN}", flush=True)
 # Multi-account: config "accounts" = {account_id: team}. Back-compat: single account_id.
 _accts = cfg.get("accounts")
 if isinstance(_accts, dict):   ACCOUNTS = list(_accts.keys())
@@ -196,7 +196,7 @@ def main():
     # gather chats across every connected account (program head = team)
     all_chats = []                      # (acct, gid, name, ts)
     for acct in ACCOUNTS:
-        print(f"Account {acct}:")
+        print(f"Account {acct}:", flush=True)
         for gid, name, ts in list_group_chats(acct):
             all_chats.append((acct, gid, name, ts))
     known = {r["group_id"] for r in store.values()}
@@ -220,8 +220,8 @@ def main():
             for r in pull_messages(gid, name, amap, gsince, acct):
                 store[ckey(r)] = r; fetched += 1
         except Exception as e:
-            print(f"  ! {name}: {e}")
-        if i % 25 == 0: print(f"  {i}/{len(todo)} groups...")
+            print(f"  ! {name}: {e}", flush=True)
+        if i % 25 == 0: print(f"  {i}/{len(todo)} groups...", flush=True)
         time.sleep(0.2)
 
     # prune to rolling window
