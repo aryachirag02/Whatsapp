@@ -19,7 +19,9 @@ from datetime import datetime, timezone, timedelta
 
 here = os.path.dirname(os.path.abspath(__file__))
 cfg  = json.load(open(os.path.join(here, "config.json")))
-API, DSN = cfg["api_key"], cfg["dsn"].rstrip("/")
+API = (os.environ.get("UNIPILE_API_KEY") or cfg.get("api_key", "")).strip()
+DSN = cfg["dsn"].rstrip("/")
+print(f"auth check: key length={len(API)} | dsn={DSN}")
 # Multi-account: config "accounts" = {account_id: team}. Back-compat: single account_id.
 _accts = cfg.get("accounts")
 if isinstance(_accts, dict):   ACCOUNTS = list(_accts.keys())
