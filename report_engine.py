@@ -393,6 +393,11 @@ def analyze(recs, as_of, keep_gids=None):
         concern=concern_by_gid.get(gid,0); churn=churn_groups.get(gid,{}).get("n",0)
         open_needs=bool(aw and aw["needs_reply"]); breached=bool(aw and aw["breached"]); cold=bool(aw and aw["cold"])
         slow=(pg["median_min"] or 0)>120
+        flagged = (concern>0 or churn>0)
+        # No flagged wording? Only list on a genuinely bad service PATTERN
+        # (median reply > 2h). A currently-open/cold thread is NOT enough —
+        # "Act now" already surfaces those; re-listing them here is noise.
+        if not flagged and not slow: continue
         score=concern + 2*churn + (3 if open_needs else 0) + (2 if cold else (1 if breached else 0)) + (1 if slow else 0)
         if score<=0: continue
         st=("cold" if cold else ("breached" if breached else ("open" if open_needs else "ok")))
@@ -652,7 +657,7 @@ def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,atta
     for m in sorted(merged.values(),key=lambda x:-x["score"])[:20]:
         st=(f'<span class=pill style="background:#fef3f2;color:{BAD}">awaiting reply</span>' if m["open"]
             else f'<span class=pill style="background:#ecfdf3;color:{OK}">replied</span>')
-        lat=esc((m["latest"] or "")[:130]) or f'<span style="color:{MUT}">— slow replies / open threads, no flagged wording</span>'
+        lat=esc((m["latest"] or "")[:130]) or f'<span style="color:{MUT}">— no flagged wording; listed for slow-service pattern (median reply &gt;2h)</span>'
         aik=ai_key_by_group.get(m["group"])
         risk_rows+=(f'<tr><td>{esc(m["group"])}{ai_line(aik) if aik else ""}</td>'
                     f'<td style="text-align:center">{m["churn"] or "—"}</td>'
@@ -811,7 +816,6 @@ table.hm td.hd{{border:none;padding:0 7px 0 0;color:{MUT};font-size:10.5px;white
 {card("Concerning (7d)", trend["conc"]["cur"], BAD if trend["conc"]["cur"]>trend["conc"]["prev"] else OK, delta_n(trend["conc"]["cur"],trend["conc"]["prev"]))}
 {card("Median reply (7d)", fmt(trend["med"]["cur"]), INK, delta_reply(trend["med"]["cur"],trend["med"]["prev"]))}
 {card("Within SLA (7d)", (str(round(trend["within"]["cur"]))+"%") if trend["within"]["cur"] is not None else "—", medcol, delta_pct(trend["within"]["cur"],trend["within"]["prev"]))}
-{card("New students (7d)", s["new_students"], INK)}
 </div>
 
 <h2>Act now — needs your reply <span style="font-weight:400;color:{MUT};font-size:12px">({s["needs_attention"]} threads · breached first, then breaching soon)</span></h2>
@@ -826,7 +830,7 @@ table.hm td.hd{{border:none;padding:0 7px 0 0;color:{MUT};font-size:10.5px;white
 </details>
 
 <h2>Accounts at risk <span style="font-weight:400;color:{MUT};font-size:12px">(churn wording + problem groups, worst first)</span></h2>
-<div class=sec>Groups with refund/stop/complaint wording or repeated concerns and slow replies. Call these.</div>
+<div class=sec>Groups with refund/stop/complaint wording, or a slow-service pattern (median reply &gt;2h). Call these.</div>
 <table><thead><tr><th>Student group</th><th style="text-align:center">Churn flags</th><th style="text-align:center">Concerns</th><th>Latest concern</th><th>Median reply</th><th style="text-align:right">Status</th></tr></thead><tbody>{risk_rows}</tbody></table>
 
 <details><summary>All concerning messages — {len(concerning_msgs)} in last {LOOKBACK_DAYS} days</summary>
@@ -837,10 +841,6 @@ table.hm td.hd{{border:none;padding:0 7px 0 0;color:{MUT};font-size:10.5px;white
 {bars}
 </details>
 
-<details><summary>New students this week — {len(new_students)} groups (showing latest 10)</summary>
-<div class=sec>"First reply" = how fast we answered their first message — the first impression.</div>
-<table><thead><tr><th>Student group</th><th>Started</th><th style="text-align:center">Messages</th><th>First reply</th><th style="text-align:right">Status</th></tr></thead><tbody>{ns_rows}</tbody></table>
-</details>
 
 <h2>Team accountability <span style="font-weight:400;color:{MUT};font-size:12px">(bottom 5 responders, min 10 replies)</span></h2>
 <table><thead><tr><th>Team member</th><th>Replies</th><th>Median</th><th>Within SLA</th><th>Concerning handled</th><th style="text-align:right">Flag</th></tr></thead><tbody>{st_rows}</tbody></table>
