@@ -50,7 +50,7 @@ jobs:
           cat > config.json <<EOF
           {
             "api_key": "${UNIPILE_API_KEY}",
-            "dsn": "https://api49.unipile.com:17927",
+            "dsn": "https://api55.unipile.com:18582",
             "accounts": {
               "FbN6fZUpTfGcLfbjC9Nkig": "sat",
               "mwKJGuboQdyIJRi_bg_-7A": "ap",
