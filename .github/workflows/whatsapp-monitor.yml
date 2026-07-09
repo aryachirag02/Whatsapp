@@ -65,6 +65,8 @@ jobs:
           EOF
 
       - name: Pull messages (READ-ONLY)
+        env:
+          UNIPILE_API_KEY: ${{ secrets.UNIPILE_API_KEY }}
         run: python unipile_pull.py
 
       - name: Build dashboards (master + 5 teams; AI summaries inline, cached)
