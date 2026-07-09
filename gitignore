@@ -1,0 +1,30 @@
+# ── SECRETS — never commit ────────────────────────────────
+config.json
+staff_overrides.json
+
+# ── Data / state (regenerated each run; persisted via Actions cache) ──
+messages_*.json
+messages_latest*.json
+attendees.json
+summary.json
+group_list_cache.json
+state.json
+pull_progress.json
+batched_pull_ckpt.json
+_chunk_store.json
+_chunk_dir.json
+_chunk_ckpt.json
+dashboard.html          # rebuilt + deployed every run, no need to version it
+*.bak
+
+# ── Caches / logs / OS junk ───────────────────────────────
+.cache/
+.cache2/
+.cache3/
+__pycache__/
+*.pyc
+*.log
+.DS_Store
+testwrite.tmp
+rtest.dst
+ai_summaries.json

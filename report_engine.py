@@ -1,0 +1,867 @@
+#!/usr/bin/env python3
+"""
+AP Guru WhatsApp response + content engine (READ-ONLY analytics; no sending).
+
+Reads messages_latest.json (from unipile_pull.py) and attendees.json (the
+global lid->phone+name directory) and writes:
+  - dashboard.html   (self-refreshing report)
+  - summary.json     (machine-readable metrics)
+
+Highlights for a business owner:
+  * What parents are messaging about + every concerning message (top of page).
+  * Accounts at risk (churn) — groups where someone is unhappy / asked to stop.
+  * 7-day trend vs the previous 7 days (are we getting better or worse?).
+  * How fast we reply (distribution) and response rate BY NAMED team member.
+
+Corrections (read automatically if present, next to this script):
+  staff_overrides.json  {"force_staff": ["9199..."], "force_student": ["91..."]}
+  staff_names.json      {"919XXXXXXXXX": "Riya (SAT)", "lid:1234@lid": "Owner"}
+"""
+import json, os, glob, re, statistics, html, time, urllib.request
+from collections import Counter, defaultdict
+from datetime import datetime, timezone, timedelta
+
+# ---------- CONFIG KNOBS ----------
+STAFF_MIN_GROUPS = 3
+COLD_HOURS       = 12
+IST              = timedelta(hours=5, minutes=30)
+REFRESH_SECONDS  = 300
+MEDIA_MARKERS    = ("cannot display this type of message",)
+try:
+    _cfg = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")))
+except Exception:
+    _cfg = {}
+LOOKBACK_DAYS = _cfg.get("lookback_days", 30)
+# groups whose NAME contains any of these are treated as internal and hidden
+EXCLUDE_GROUP_WORDS = [w.lower() for w in _cfg.get("exclude_group_words",
+    _cfg.get("exclude_keywords", ["coordination","content","grading","internal","team","staff",
+             "accounts","tracking","tech issues","payglocal","non sat"]))]
+
+FILLER = {"thanks","thank you","thankyou","thanku","thx","ty","ok","okay","okk","okie",
+          "noted","great","sure","perfect","done","got it","alright","cool","fine",
+          "yes","yep","yeah","no","welcome","good","nice","super","🙏","👍","👍🏻","❤️","🙂"}
+
+STAFF_NAME_WORDS = ["coordinator","coordinater","manager","mgr","rm","qc","hr",
+    "ap guru","apguru","work","team","tutor","teacher","faculty","trainer","mentor",
+    "counsel","counsellor","counselor","support","admin","relationship","grading",
+    "ops","sales","accountant","tech team","program manager"]
+PARENT_NAME_WORDS = ["parent","mom","mum","dad","mother","father","papa","mummy"]
+
+CATS = {
+ "payment": [
+    "fee","fees","payment","pay the","invoice","refund","installment","instalment","emi",
+    "pending payment","balance payment","amount due","charge","charged","transaction",
+    "receipt","gst","paisa","paise","bhugtan","raseed","not paid","kindly pay","outstanding"],
+ "scheduling": [
+    "reschedule","re-schedule","reschedul","postpone","prepone","cancel","cancelled",
+    "cancellation","shift the class","change the time","change the timing","move the class",
+    "another time","not available","won't be able","wont be able","unable to attend",
+    "can't attend","cant attend","miss the class","missing the class","skip the class",
+    "no class today","holiday","chutti","time slot","time change","new timing","on leave"],
+ "academic": [
+    "exam","exams","test","tests","quiz","score","scores","marks","grade","grades",
+    "result","results","doubt","doubts","syllabus","homework","assignment","mock test",
+    "not understanding","didn't understand","didnt understand","struggling","weak in",
+    "falling behind","revision","deadline","submission"],
+ "complaint": [
+    "not happy","unhappy","disappointed","disappoint","disappointing","worst","useless",
+    "waste of","bad experience","complaint","complain","unprofessional","rude",
+    "not responding","no response","still waiting","again and again","repeatedly",
+    "frustrated","frustrating","unacceptable","escalate","escalation","not satisfied",
+    "dissatisfied","bekar","kharab","ghatiya","disgusting","pathetic","horrible",
+    "discontinue","stop the class","stop the classes","stop classes","want refund",
+    "need refund","cancel the subscription","cancel subscription","not interested anymore"],
+}
+URGENT = ["urgent","urgently","asap","emergency","immediately","tomorrow exam",
+          "exam tomorrow","exam is tomorrow","test tomorrow","panic","stressed","stress"]
+CONCERN_HARD = ["refund","discontinue","stop the class","stop classes","stop the classes",
+                "cancel the subscription","cancel subscription","escalate","not satisfied",
+                "dissatisfied","complaint","worst","unprofessional","not happy","disappointed",
+                "no response","not responding","still waiting","unacceptable","bekar","ghatiya",
+                "pathetic","horrible","want refund","need refund","repeatedly"]
+# the subset that signals real churn risk (account may leave)
+CHURN_HARD = ["refund","discontinue","stop the class","stop classes","stop the classes",
+              "cancel the subscription","cancel subscription","escalate","not satisfied",
+              "dissatisfied","not interested anymore","worst","unprofessional","pathetic",
+              "horrible","ghatiya","bekar","want refund","need refund"]
+
+# Words/phrases that signal the parent is asking for something => we owe a reply
+REQUEST_WORDS = ["please","pls","plz","kindly","can you","could you","can we","could we",
+    "would you","would it","will you","let me know","need to know","want to know","share",
+    "send","provide","confirm","update me","should we","do we","may i","requesting",
+    "request you","call me","when","what time","how many","how much","how do","which",
+    "any update","waiting for","get back","revert","is it possible","possible to"," asap"]
+
+def _matcher(words):
+    pat = "|".join(re.escape(w) for w in sorted(set(words), key=len, reverse=True))
+    return re.compile(r"(?<![a-z0-9])(?:" + pat + r")(?![a-z0-9])", re.I)
+_REQUEST_RE = _matcher(REQUEST_WORDS)
+
+def need_type(text):
+    """How much does this last parent message look like it needs a reply?"""
+    if not text: return "fyi"
+    if is_media(text): return "attachment"
+    if "?" in text: return "question"
+    if _REQUEST_RE.search(_clean(text)): return "request"
+    return "fyi"
+
+_CAT_RE   = {c: _matcher(ws) for c, ws in CATS.items()}
+_URGENT_RE= _matcher(URGENT)
+_HARD_RE  = _matcher(CONCERN_HARD)
+_CHURN_RE = _matcher(CHURN_HARD)
+STAFF_NAME_RE  = _matcher(STAFF_NAME_WORDS)
+PARENT_NAME_RE = _matcher(PARENT_NAME_WORDS)
+
+def _clean(t): return (t or "").replace("’","'").replace("‘","'").lower()
+def is_media(t): return bool(t) and any(m in t.lower() for m in MEDIA_MARKERS)
+def normalize(t):
+    if not t: return ""
+    return "".join(c for c in t.lower() if c.isalnum() or c.isspace() or c in "🙏👍❤️🙂").strip()
+def is_filler(text):
+    if is_media(text): return False
+    n=normalize(text)
+    if n=="": return False
+    if n in FILLER: return True
+    w=n.split(); return len(w)<=2 and all(x in FILLER for x in w)
+
+def classify(text):
+    """Return (tags:set, concerning:bool, churn:bool, complaint_cat:bool)."""
+    if not text or is_media(text): return set(), False, False, False
+    low=_clean(text)
+    tags={c for c,rx in _CAT_RE.items() if rx.search(low)}
+    urgent=bool(_URGENT_RE.search(low))
+    if urgent and ("academic" in tags or "scheduling" in tags): tags.add("urgent")
+    complaint = "complaint" in tags
+    concerning = complaint or bool(_HARD_RE.search(low)) or (urgent and ("academic" in tags or "scheduling" in tags))
+    churn = complaint or bool(_CHURN_RE.search(low))
+    return tags, concerning, churn, complaint
+
+def fmt(mins):
+    if mins is None: return "—"
+    m=int(round(mins)); h,mm=divmod(m,60)
+    if h>=24: d,hh=divmod(h,24); return f"{d}d {hh}h"
+    return f"{h}h {mm:02d}m" if h else f"{mm}m"
+
+def fmt_phone(canon):
+    if not canon or str(canon).startswith("lid:"): return "—"
+    d="".join(c for c in str(canon) if c.isdigit())
+    if len(d)==12 and d.startswith("91"): return f"+91 {d[2:7]} {d[7:]}"
+    if len(d)==10: return f"+91 {d[:5]} {d[5:]}"
+    return "+"+d if d else "—"
+
+# ---------- LOAD ----------
+here=os.path.dirname(os.path.abspath(__file__))
+def latest_messages_file():
+    fixed=os.path.join(here,"messages_latest.json")
+    if os.path.exists(fixed): return fixed
+    cand=sorted(glob.glob(os.path.join(here,"messages_*.json")))
+    if not cand: raise SystemExit("No messages_*.json found. Run unipile_pull.py first.")
+    return cand[-1]
+
+# ---------- AI THREAD SUMMARIES (inline, cached) ----------
+AI_MODEL="claude-haiku-4-5-20251001"; AI_MAX_NEW=40
+AI_SYSTEM=("You summarize WhatsApp threads for AP Guru, an online tutoring company. "
+ "Each thread is between AP Guru's team and a student's parent. In ONE sentence "
+ "(max 22 words), plain English, state what the parent needs right now and any "
+ "deadline/urgency. If they reference something earlier ('this also please'), "
+ "resolve WHAT they mean from context. No preamble, no quotes, just the sentence.")
+
+def ai_summaries(need_ctx):
+    """need_ctx: {key:{'group','context'}} -> {key:{'summary','ts'}}.
+    Key embeds the last-message timestamp, so each thread is summarized once
+    until a new message arrives (ai_summaries.json is just that cache).
+    No ANTHROPIC_API_KEY -> silently returns whatever is cached."""
+    cpath=os.path.join(here,"ai_summaries.json")
+    try: cache=json.load(open(cpath))
+    except Exception: cache={}
+    cache={k:v for k,v in cache.items() if k in need_ctx}      # prune stale
+    key=os.environ.get("ANTHROPIC_API_KEY","").strip()
+    if key:
+        new=0
+        for k,t in need_ctx.items():
+            if k in cache or not t.get("context"): continue
+            if new>=AI_MAX_NEW: break
+            convo="\n".join(f'{m["role"]}{(" ("+m["who"]+")") if m.get("who") else ""}: {m["text"]}'
+                            for m in t["context"])
+            body=json.dumps({"model":AI_MODEL,"max_tokens":80,"system":AI_SYSTEM,
+                "messages":[{"role":"user","content":
+                    f"Group: {t.get('group','')}\nRecent thread (oldest first):\n{convo}\n\nSummary:"}]}).encode()
+            req=urllib.request.Request("https://api.anthropic.com/v1/messages",data=body,
+                headers={"Content-Type":"application/json","x-api-key":key,
+                         "anthropic-version":"2023-06-01"})
+            try:
+                with urllib.request.urlopen(req,timeout=30) as r: data=json.loads(r.read())
+                summ=" ".join(b.get("text","") for b in data.get("content",[])
+                              if b.get("type")=="text").strip()
+                if summ:
+                    cache[k]={"summary":summ[:200],
+                              "ts":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())}
+                    new+=1
+            except Exception:
+                pass
+            time.sleep(0.3)
+        if new: print(f"ai: {new} new summaries ({len(cache)} cached)")
+    json.dump(cache,open(cpath,"w"),indent=1)
+    return cache
+
+def load_directory():
+    p=os.path.join(here,"attendees.json")
+    if not os.path.exists(p): return {"lid2phone":{}, "names":{}, "self_phones":[]}
+    return json.load(open(p))
+
+def analyze(recs, as_of, keep_gids=None):
+    cutoff=as_of-timedelta(days=LOOKBACK_DAYS)
+    d=load_directory()
+    lid2phone=d.get("lid2phone",{}); dir_names=d.get("names",{})
+    self_phones=set(d.get("self_phones",[]))
+
+    name_over={}
+    npath=os.path.join(here,"staff_names.json")
+    if os.path.exists(npath):
+        name_over={k:v for k,v in json.load(open(npath)).items() if not k.startswith("_")}
+
+    def canon(sid):
+        """Unify identity: prefer phone (via lid directory) else raw id."""
+        if not sid: return None
+        if str(sid).startswith("lid:"):
+            ph=lid2phone.get(sid[4:])
+            return ph or sid
+        return sid
+
+    groups=defaultdict(list); group_name={}
+    sender_groups=defaultdict(set); sender_names=defaultdict(Counter); self_ids=set()
+    for r in recs:
+        gid=r["group_id"]; group_name[gid]=r.get("group_name") or gid
+        ts=datetime.fromisoformat(r["timestamp"].replace("Z","+00:00"))
+        sid=canon(r.get("sender"))
+        text=r.get("text") or ""
+        filler=bool(r.get("is_filler")) or is_filler(text)
+        tags,conc,churn,compl=classify(text)
+        groups[gid].append({"ts":ts,"sid":sid,"filler":filler,"text":text,"tags":tags,
+                            "concerning":conc,"churn":churn,"is_self":bool(r.get("is_self"))})
+        if sid:
+            sender_groups[sid].add(gid)
+            nm=(r.get("sender_name") or "").strip() or (r.get("push_name") or "").strip()
+            if nm: sender_names[sid][nm]+=1
+            if r.get("is_self") or sid in self_phones: self_ids.add(sid)
+
+    def best_name(sid):
+        if sid in name_over: return name_over[sid]
+        if sid in dir_names: return dir_names[sid]
+        if sender_names[sid]: return sender_names[sid].most_common(1)[0][0]
+        return None
+
+    # ----- team detection -----
+    overrides={"force_staff":[],"force_student":[]}
+    opath=os.path.join(here,"staff_overrides.json")
+    if os.path.exists(opath): overrides.update(json.load(open(opath)))
+    team=set()
+    for sid,gs in sender_groups.items():
+        nm=best_name(sid) or ""
+        if sid in self_ids: team.add(sid)
+        elif PARENT_NAME_RE.search(nm) and len(gs)<STAFF_MIN_GROUPS: continue
+        elif len(gs)>=STAFF_MIN_GROUPS or STAFF_NAME_RE.search(nm): team.add(sid)
+    team|=set(overrides["force_staff"]); team-=set(overrides["force_student"])
+    def is_team(sid): return sid in team
+
+    win7=as_of-timedelta(days=7)
+    def half(ts): return "cur" if ts>=win7 else "prev"
+
+    per_group=[]; all_resp=[]; staff_stats=defaultdict(list); staff_concern=Counter()
+    gowner=defaultdict(Counter)   # gid -> Counter of team responders (to name a thread "owner")
+    awaiting=[]; cat_counts=Counter(); inbound_total=0; concerning_msgs=[]
+    vol={"cur":0,"prev":0}; conc_period={"cur":0,"prev":0}
+    resp_period={"cur":[],"prev":[]}; churn_groups=defaultdict(lambda:{"n":0,"latest":None,"latest_ts":None})
+    heat=[[0]*24 for _ in range(7)]          # [weekday][hour-IST] inbound volume
+    concern_by_gid=Counter(); gstart={}; gfirst_resp={}; gmsgs=Counter()
+
+    hidden_internal=0
+    for gid,evs in groups.items():
+        gname=(group_name.get(gid) or "").lower()
+        senders={e["sid"] for e in evs if e["sid"]}
+        # internal = only team/self ever spoke, or name matches exclude words
+        if (senders and senders<=team) or any(w in gname for w in EXCLUDE_GROUP_WORDS):
+            hidden_internal+=1; continue
+        if keep_gids is not None and gid not in keep_gids:
+            continue
+        evs.sort(key=lambda x:x["ts"])
+        if evs: gstart[gid]=evs[0]["ts"]
+        waiting=False; start=None; start_concern=False; bursts=0; resp_here=[]
+        last_concern=None; last_inbound=None
+        for e in evs:
+            inbound=(not e["is_self"]) and (not is_team(e["sid"]))
+            if inbound:
+                if not e["filler"]:
+                    inbound_total+=1; vol[half(e["ts"])]+=1; last_inbound=e
+                    gmsgs[gid]+=1
+                    tist=e["ts"]+IST; heat[tist.weekday()][tist.hour]+=1
+                    if e["concerning"]: concern_by_gid[gid]+=1
+                    for t in e["tags"]:
+                        if t!="urgent": cat_counts[t]+=1
+                    if e["concerning"]:
+                        cat_counts["concerning"]+=1; conc_period[half(e["ts"])]+=1
+                        rec={"group":group_name[gid],"who":best_name(e["sid"]) or fmt_phone(e["sid"]),
+                             "ts":e["ts"],"tags":sorted(t for t in e["tags"] if t!="urgent") or ["urgent"],
+                             "text":e["text"][:300],"churn":e["churn"]}
+                        concerning_msgs.append(rec); last_concern=rec
+                    if e["churn"]:
+                        cg=churn_groups[gid]; cg["n"]+=1
+                        if not cg["latest_ts"] or e["ts"]>cg["latest_ts"]:
+                            cg["latest_ts"]=e["ts"]; cg["latest"]=e["text"][:200]
+                if e["filler"]: continue
+                if not waiting: waiting,start=True,e["ts"]; start_concern=e["concerning"]
+                elif e["concerning"]: start_concern=True
+            else:
+                if e["sid"]: gowner[gid][e["sid"]]+=1
+                if waiting:
+                    mins=(e["ts"]-start).total_seconds()/60
+                    met=mins<=sla_hours_for(start)*60
+                    all_resp.append((mins,met,e["sid"])); resp_here.append((mins,met))
+                    resp_period[half(start)].append((mins,met))
+                    staff_stats[e["sid"]].append((mins,met))
+                    if start_concern: staff_concern[e["sid"]]+=1
+                    bursts+=1; waiting=False; start_concern=False
+        open_mins=(as_of-start).total_seconds()/60 if waiting else None
+        if waiting:
+            met_open=open_mins<=sla_hours_for(start)*60
+            last_text=(last_inbound["text"] if last_inbound else "")
+            ntype=need_type(last_text)
+            # attachments alone are usually homework/screenshots — acknowledge, not "act now"
+            needs_reply = ntype in ("question","request") or start_concern
+            own=None
+            if gowner[gid]:
+                osid=gowner[gid].most_common(1)[0][0]
+                own=best_name(osid) or fmt_phone(osid)
+            remaining=sla_hours_for(start)*60-open_mins
+            awaiting.append({"group":group_name[gid],"gid":gid,"waiting_min":open_mins,
+                             "owner":own,"breach_soon":(met_open and remaining<=30),
+                             "ctx_key":f"{gid}|{evs[-1]['ts'].isoformat()}",
+                             "sla_h":sla_hours_for(start),"breached":not met_open,
+                             "cold":open_mins>COLD_HOURS*60,"concerning":start_concern,
+                             "need_type":ntype,"needs_reply":needs_reply,
+                             "last_text":last_text,
+                             "snippet":(last_concern["text"] if (start_concern and last_concern) else "")})
+        med=statistics.median([m for m,_ in resp_here]) if resp_here else None
+        within=(sum(1 for _,ok in resp_here if ok)/len(resp_here)*100) if resp_here else None
+        if resp_here: gfirst_resp[gid]=resp_here[0][0]
+        per_group.append({"gid":gid,"group":group_name[gid],"bursts":bursts,"median_min":med,"within_pct":within})
+
+    n_resp=len(all_resp)
+    overall_med=statistics.median([m for m,_,_ in all_resp]) if all_resp else None
+    overall_within=(sum(1 for _,ok,_ in all_resp if ok)/n_resp*100) if n_resp else None
+    awaiting.sort(key=lambda x:(not x["concerning"],not x["breached"],-x["waiting_min"]))
+    n_breach_open=sum(1 for a in awaiting if a["breached"]); n_cold=sum(1 for a in awaiting if a["cold"])
+    concerning_msgs.sort(key=lambda x:-x["ts"].timestamp())
+    # only threads that actually look like they need a reply (question/request/attachment/concerning)
+    need_order={"concerning":0,"question":1,"request":2,"attachment":3}
+    attention=[a for a in awaiting if a["needs_reply"]]
+    attention.sort(key=lambda x:(not x["concerning"],
+                                 need_order.get(x["need_type"],9),
+                                 not x["breached"], -x["waiting_min"]))
+    attach_open=[a for a in awaiting if not a["needs_reply"] and a["need_type"]=="attachment"]
+    attach_open.sort(key=lambda x:-x["waiting_min"])
+    fyi_open=[a for a in awaiting if not a["needs_reply"] and a["need_type"]!="attachment"]
+    fyi_open.sort(key=lambda x:-x["waiting_min"])
+
+    # trend (last 7d vs prev 7d)
+    def med_of(lst): return statistics.median([m for m,_ in lst]) if lst else None
+    def within_of(lst): return (sum(1 for _,ok in lst if ok)/len(lst)*100) if lst else None
+    trend={"vol":vol,"conc":conc_period,
+           "med":{"cur":med_of(resp_period["cur"]),"prev":med_of(resp_period["prev"])},
+           "within":{"cur":within_of(resp_period["cur"]),"prev":within_of(resp_period["prev"])}}
+
+    # reply-speed distribution
+    buckets=[("≤ 5 min",0,5),("5–30 min",5,30),("30 min–2 h",30,120),("2–6 h",120,360),("> 6 h",360,1e9)]
+    dist=[]
+    for lab,lo,hi in buckets:
+        c=sum(1 for m,_,_ in all_resp if lo<=m<hi)
+        dist.append((lab,c))
+
+    # accounts at risk
+    at_risk=[]
+    awaiting_gids={a["gid"] for a in awaiting}
+    for gid,info in churn_groups.items():
+        at_risk.append({"gid":gid,"group":group_name[gid],"n":info["n"],"latest":info["latest"],
+                        "ts":info["latest_ts"],"open":gid in awaiting_gids})
+    at_risk.sort(key=lambda x:(-x["n"],-x["ts"].timestamp()))
+
+    # group watchlist (worst groups by a problem score)
+    awaiting_by_gid={a["gid"]:a for a in awaiting}
+    watchlist=[]
+    for pg in per_group:
+        gid=pg["gid"]; aw=awaiting_by_gid.get(gid)
+        concern=concern_by_gid.get(gid,0); churn=churn_groups.get(gid,{}).get("n",0)
+        open_needs=bool(aw and aw["needs_reply"]); breached=bool(aw and aw["breached"]); cold=bool(aw and aw["cold"])
+        slow=(pg["median_min"] or 0)>120
+        score=concern + 2*churn + (3 if open_needs else 0) + (2 if cold else (1 if breached else 0)) + (1 if slow else 0)
+        if score<=0: continue
+        st=("cold" if cold else ("breached" if breached else ("open" if open_needs else "ok")))
+        watchlist.append({"group":pg["group"],"concern":concern,"churn":churn,
+                          "median_min":pg["median_min"],"within_pct":pg["within_pct"],
+                          "status":st,"score":score})
+    watchlist.sort(key=lambda x:-x["score"]); watchlist=watchlist[:15]
+
+    # new students (groups whose first activity is recent => likely created in-window)
+    new_cut=as_of-timedelta(days=7)
+    new_students=[]
+    for gid,st in gstart.items():
+        if st and st > cutoff+timedelta(hours=18) and st >= new_cut and gmsgs.get(gid,0)>=1:
+            aw=awaiting_by_gid.get(gid)
+            new_students.append({"group":group_name[gid],"started":st,"msgs":gmsgs.get(gid,0),
+                                 "first_resp":gfirst_resp.get(gid),
+                                 "open":bool(aw and aw["needs_reply"])})
+    new_students.sort(key=lambda x:-x["started"].timestamp())
+
+    # per-team-member
+    staff_rows=[]
+    for sid,lst in staff_stats.items():
+        med=statistics.median([m for m,_ in lst]); within=sum(1 for _,ok in lst if ok)/len(lst)*100
+        staff_rows.append({"id":sid,"name":best_name(sid) or fmt_phone(sid),"phone":fmt_phone(sid),
+                           "handled":len(lst),"median_min":med,"within_pct":within,
+                           "concerning":staff_concern.get(sid,0)})
+    staff_rows.sort(key=lambda x:-x["handled"])
+    loads=[r["handled"] for r in staff_rows]; med_load=statistics.median(loads) if loads else 0
+    for r in staff_rows:
+        slow=r["median_min"]>120; busy=r["handled"]>med_load
+        r["flag"]="look here" if (slow and not busy) else ("heavy load" if (slow and busy) else "ok")
+
+    # ---- context for AI thread summaries (open threads only) ----
+    def _ctx(gid):
+        out=[]
+        for e in groups[gid][-14:]:
+            if e["filler"] or not (e["text"] or "").strip(): continue
+            role="Team" if (e["is_self"] or is_team(e["sid"])) else "Parent"
+            out.append({"role":role,"who":best_name(e["sid"]) or "","text":e["text"][:220]})
+        return out[-8:]
+    need_ctx={}
+    for a in attention:
+        need_ctx[a["ctx_key"]]={"group":a["group"],"context":_ctx(a["gid"])}
+    for r in at_risk:
+        if r["open"] and groups.get(r["gid"]):
+            k=f"{r['gid']}|{groups[r['gid']][-1]['ts'].isoformat()}"
+            need_ctx.setdefault(k,{"group":r["group"],"context":_ctx(r["gid"])})
+
+    summary={"generated":as_of.isoformat(),"messages":len(recs),"groups":len(groups),
+             "hidden_internal":hidden_internal,"attach_open":len(attach_open),
+             "inbound_messages":inbound_total,"responses_measured":n_resp,
+             "median_first_response_min":overall_med,"within_sla_pct":overall_within,
+             "awaiting_now":len(awaiting),"breached_open":n_breach_open,"cold_threads":n_cold,
+             "breach_soon":sum(1 for a in awaiting if a.get("breach_soon")),
+             "fyi_open":len(fyi_open),
+             "concerning_total":cat_counts.get("concerning",0),"needs_attention":len(attention),
+             "accounts_at_risk":len(at_risk),"new_students":len(new_students),
+             "watchlist_size":len(watchlist),
+             "cat_payment":cat_counts.get("payment",0),"cat_scheduling":cat_counts.get("scheduling",0),
+             "cat_academic":cat_counts.get("academic",0),"cat_complaint":cat_counts.get("complaint",0),
+             "team_detected":len(team),"staff_rows":staff_rows}
+
+    return {"summary":summary,"need_ctx":need_ctx,
+            "sender_groups":sender_groups,"team":team,"best_name":best_name,
+            "attention":attention,"fyi_open":fyi_open,"attach_open":attach_open,
+            "concerning_msgs":concerning_msgs,"cat_counts":cat_counts,
+            "inbound_total":inbound_total,"at_risk":at_risk,"trend":trend,"dist":dist,
+            "heat":heat,"watchlist":watchlist,"new_students":new_students}
+
+# ---------- TEAM CLASSIFICATION ----------
+# Ordered: a group is assigned to the FIRST team whose pattern matches its name.
+# Override any group by adding its exact name under "team_overrides" in config.json:
+#   {"team_overrides": {"Aarushi Shah GRE": "else", "Some Group": "ib"}}
+TEAMS=[("myp",  "MYP / UK admissions tests", r"\bmyp\b|\bucat\b|\btmua\b|\blnat\b|\besat\b"),
+       ("sat",  "SAT / ACT",                 r"\bsat\b|\bact\b|digital sat|dsat|psat"),
+       ("ap",   "AP",                        r"\bap\b|advanced placement|apush"),
+       ("ib",   "IB Diploma (IBDP)",         r"\bibdp\b|\bib\b|\btok\b|extended essay|\bdp[12]\b"),
+       ("igcse","IGCSE / A-Level / GCSE",    r"igcse|\bgcse\b|a-?level|as-?level|o-?level|cambridge|edexcel|\bcaie\b"),
+       ("else", "Everything else",           r".*")]
+_TEAM_OVER={k:v for k,v in _cfg.get("team_overrides",{}).items()}
+_TEAM_RE=[(slug,label,re.compile(pat,re.I)) for slug,label,pat in TEAMS]
+def team_of(name):
+    if name in _TEAM_OVER: return _TEAM_OVER[name]
+    # remove the company name so "AP Guru <> Payglocal" doesn't match the AP curriculum
+    clean=re.sub(r"ap\s*guru","",name or "",flags=re.I)
+    for slug,label,rx in _TEAM_RE:
+        if rx.search(clean): return slug
+    return "else"
+
+def build_report(messages_path=None, as_of=None):
+    """Master + one dashboard per team. AI summaries computed ONCE (shared)."""
+    messages_path=messages_path or latest_messages_file()
+    recs=json.load(open(messages_path))
+    as_of=as_of or datetime.now(timezone.utc)
+
+    # classify every group by name
+    gid_name={}; 
+    for r in recs: gid_name[r["group_id"]]=r.get("group_name") or r["group_id"]
+    team_gids=defaultdict(set)
+    for gid,nm in gid_name.items(): team_gids[team_of(nm)].add(gid)
+
+    # master analysis = everything; its need_ctx is the union of all open threads
+    master=analyze(recs, as_of, keep_gids=None)
+    AI=ai_summaries(master["need_ctx"])                       # single API pass
+    json.dump(master["summary"],open(os.path.join(here,"summary.json"),"w"),indent=2,default=str)
+
+    views=[("dashboard.html","All courses — master", None)]
+    for slug,label,_ in TEAMS:
+        views.append((f"dashboard_{slug}.html", label, team_gids.get(slug,set())))
+
+    # analyze each team once (shared AI cache covers all subsets)
+    team_R={slug: analyze(recs, as_of, keep_gids=team_gids.get(slug,set())) for slug,_,_ in TEAMS}
+    team_tally=[(slug,label,team_R[slug]["summary"]) for slug,label,_ in TEAMS]
+
+    counts={}
+    for outfile,label,gids in views:
+        if gids is None:
+            R=master; tally=team_tally
+        else:
+            slug=outfile[len("dashboard_"):-len(".html")]
+            R=team_R[slug]; tally=None
+        write_dashboard(R, AI, as_of, outfile, label, tally)
+        counts[label]=R["summary"]["needs_attention"]
+    return master["summary"], counts
+
+def write_dashboard(R, AI, as_of, outfile, label, team_tally=None):
+    _write_html(R["summary"],R["sender_groups"],R["team"],R["best_name"],fmt_phone,
+                R["attention"],R["fyi_open"],R["attach_open"],R["concerning_msgs"],
+                R["cat_counts"],R["inbound_total"],R["at_risk"],R["trend"],R["dist"],
+                R["heat"],R["watchlist"],R["new_students"],as_of,AI,outfile,label,team_tally)
+
+def sla_hours_for(ts_utc):
+    h=(ts_utc+IST).hour
+    return 2 if 12<=h<23 else 6
+
+def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,attach_open,concerning_msgs,
+                cat_counts,inbound_total,at_risk,trend,dist,heat,watchlist,new_students,as_of,AI=None,
+                outfile="dashboard.html",label="All courses — master",team_tally=None):
+    NAVY="#16243f"; INK="#15171c"; MUT="#6b7280"; LINE="#e7e9ee"
+    OK="#067647"; BAD="#b42318"; WARN="#b54708"; PUR="#5b21b6"
+    AI=AI or {}
+    AI_KEYS={k.split("|",1)[0]: k for k in AI}   # gid -> full cache key
+    def ai_line(key):
+        v=AI.get(key)
+        if not v or not v.get("summary"): return ""
+        return f'<div class=snip style="color:{PUR};font-style:normal">🤖 {html.escape(v["summary"])}</div>'
+    def esc(x): return html.escape(str(x))
+    def card(lbl,val,col=INK,sub=""):
+        sb=f'<div class=csub>{sub}</div>' if sub else ""
+        return f'<div class=c><div class=lbl>{lbl}</div><div class=val style="color:{col}">{val}</div>{sb}</div>'
+
+    # ---- trend helpers (arrows shown ON the glance tiles) ----
+    def delta_reply(cur,prev):
+        if cur is None or prev is None: return ""
+        diff=cur-prev
+        col=OK if diff<=0 else BAD; arr="▼" if diff<=0 else "▲"
+        return f'<span style="color:{col}"> {arr} {fmt(abs(diff))} vs prev 7d</span>'
+    def delta_pct(cur,prev,higher_good=True):
+        if cur is None or prev is None: return ""
+        diff=round(cur-prev); good=(diff>=0)==higher_good
+        col=OK if good else BAD; arr="▲" if diff>=0 else "▼"
+        return f'<span style="color:{col}"> {arr} {abs(diff)} pts vs prev 7d</span>'
+    def delta_n(cur,prev,higher_good=False):
+        diff=cur-prev; good=(diff>=0)==higher_good
+        col=OK if good else BAD; arr="▲" if diff>=0 else ("▬" if diff==0 else "▼")
+        return f'<span style="color:{col}"> {arr} {abs(diff)} vs prev 7d</span>'
+
+    breached=[a for a in attention if a["breached"]]
+    soon=[a for a in attention if a.get("breach_soon")]
+    at_risk_open=[a for a in at_risk if a["open"]]
+
+    # ---- TOP 5 TODAY (auto-written, priority ordered) ----
+    top=[]
+    seen=set()
+    def add(icon,text,group=None):
+        key=group or text
+        if key in seen or len(top)>=5: return
+        seen.add(key); top.append((icon,text))
+    for a in breached:
+        if a["concerning"]:
+            ow=f" · usually {esc(a['owner'])}" if a.get("owner") else ""
+            add("🔴",f"<b>{esc(a['group'])}</b> — concerning message waiting <b>{fmt(a['waiting_min'])}</b>, SLA breached{ow}",a["group"])
+    for r in at_risk_open:
+        snip=esc((r["latest"] or "")[:90])
+        add("🔴",f"Churn risk unanswered: <b>{esc(r['group'])}</b> — “{snip}…”",r["group"])
+    for a in breached:
+        ow=f" · usually {esc(a['owner'])}" if a.get("owner") else ""
+        add("🔴",f"<b>{esc(a['group'])}</b> — {esc(a['need_type'])} waiting <b>{fmt(a['waiting_min'])}</b>, SLA breached{ow}",a["group"])
+    if soon:
+        add("🟠",f"<b>{len(soon)} thread{'s' if len(soon)!=1 else ''}</b> breach SLA within 30 min — save these first")
+    if trend["conc"]["cur"]>trend["conc"]["prev"]:
+        add("🟠",f"Concerning messages rising: <b>{trend['conc']['cur']}</b> this week vs {trend['conc']['prev']} last week")
+    slow=[r for r in s["staff_rows"] if r["flag"]=="look here" and r["handled"]>=10]
+    if slow:
+        w=min(slow,key=lambda r:r["within_pct"])
+        add("🟠",f"Check in with <b>{esc(w['name'])}</b> — median reply {fmt(w['median_min'])}, {round(w['within_pct'])}% in SLA")
+    ns_open=[n for n in new_students if n["open"]]
+    if ns_open:
+        add("🟠",f"<b>{len(ns_open)} new student group{'s' if len(ns_open)!=1 else ''}</b> awaiting a reply — first impressions at stake")
+    if not top:
+        top.append(("🟢","All clear — no breaches, no churn risks, nothing urgent"))
+    top5="".join(f'<div class=t5><span class=t5i>{i}</span><span>{t}</span></div>' for i,t in top)
+
+    # ---- ACT NOW table (breached → breaching soon → rest, with owner) ----
+    TYPE_COL={"concerning":BAD,"question":"#0891b2","request":PUR,"attachment":WARN}
+    def sla_pill(a):
+        if a["cold"]:    return f'<span class=pill style="background:#fef3f2;color:{BAD}">cold &gt;{COLD_HOURS}h</span>'
+        if a["breached"]:return f'<span class=pill style="background:#fef3f2;color:{BAD}">breached</span>'
+        if a.get("breach_soon"): return f'<span class=pill style="background:#fffaeb;color:{WARN}">&lt;30m left</span>'
+        return f'<span class=pill style="background:#ecfdf3;color:{OK}">in SLA</span>'
+    ordered=breached+soon+[a for a in attention if not a["breached"] and not a.get("breach_soon")]
+    at_rows=""
+    for a in ordered[:60]:
+        typ="concerning" if a["concerning"] else a["need_type"]
+        tcol=TYPE_COL.get(typ,MUT)
+        ttag=f'<span class=tg style="background:#f3f4f6;color:{tcol}">{esc(typ)}</span>'
+        msg=esc((a["last_text"] or "")[:150]) or "<span style='color:%s'>(attachment / media)</span>"%MUT
+        ow=esc(a["owner"]) if a.get("owner") else "—"
+        at_rows+=(f'<tr><td>{esc(a["group"])}{ai_line(a.get("ctx_key",""))}</td><td>{ttag}<div class=snip>{msg}</div></td>'
+                  f'<td style="white-space:nowrap;color:{MUT}">{ow}</td>'
+                  f'<td style="white-space:nowrap">{fmt(a["waiting_min"])}</td>'
+                  f'<td style="text-align:right">{sla_pill(a)}</td></tr>')
+    if not at_rows: at_rows=f'<tr><td colspan=5 style="color:{OK};padding:14px">Nothing needs a reply ✓</td></tr>'
+
+    fyi_rows=""
+    for a in fyi_open:
+        fyi_rows+=(f'<tr><td>{esc(a["group"])}</td><td><div class=snip>{esc((a["last_text"] or "")[:150])}</div></td>'
+                   f'<td style="white-space:nowrap">{fmt(a["waiting_min"])}</td></tr>')
+    if not fyi_rows: fyi_rows=f'<tr><td colspan=3 style="color:{MUT};padding:10px">None</td></tr>'
+
+    # ---- AT RISK (churn watch merged with problem-group watchlist) ----
+    latest_conc={}   # group name -> most recent concerning text (fallback)
+    for m in concerning_msgs:                       # already sorted newest first
+        latest_conc.setdefault(m["group"],m["text"])
+    ai_key_by_group={r["group"]:AI_KEYS.get(r["gid"]) for r in at_risk if r.get("gid")}
+    churn_by_group={r["group"]:r for r in at_risk}
+    wl_by_group={w["group"]:w for w in watchlist}
+    merged={}
+    for g in list(churn_by_group)+list(wl_by_group):
+        if g in merged: continue
+        cr=churn_by_group.get(g); wl=wl_by_group.get(g)
+        merged[g]={"group":g,
+                   "churn":(cr["n"] if cr else (wl["churn"] if wl else 0)),
+                   "concern":(wl["concern"] if wl else (cr["n"] if cr else 0)),
+                   "latest":((cr["latest"] if cr else "") or latest_conc.get(g,"")),
+                   "median":(wl["median_min"] if wl else None),
+                   "open":(cr["open"] if cr else (wl["status"] in ("open","breached","cold") if wl else False)),
+                   "score":((wl["score"] if wl else 0)+(cr["n"]*2 if cr else 0))}
+    risk_rows=""
+    for m in sorted(merged.values(),key=lambda x:-x["score"])[:20]:
+        st=(f'<span class=pill style="background:#fef3f2;color:{BAD}">awaiting reply</span>' if m["open"]
+            else f'<span class=pill style="background:#ecfdf3;color:{OK}">replied</span>')
+        lat=esc((m["latest"] or "")[:130]) or f'<span style="color:{MUT}">— slow replies / open threads, no flagged wording</span>'
+        aik=ai_key_by_group.get(m["group"])
+        risk_rows+=(f'<tr><td>{esc(m["group"])}{ai_line(aik) if aik else ""}</td>'
+                    f'<td style="text-align:center">{m["churn"] or "—"}</td>'
+                    f'<td style="text-align:center">{m["concern"] or "—"}</td>'
+                    f'<td>{lat}</td>'
+                    f'<td style="white-space:nowrap">{fmt(m["median"])}</td>'
+                    f'<td style="text-align:right">{st}</td></tr>')
+    if not risk_rows: risk_rows=f'<tr><td colspan=6 style="color:{OK};padding:14px">No at-risk accounts ✓</td></tr>'
+
+    # ---- concerning messages (collapsible) ----
+    cm_rows=""
+    for m in concerning_msgs:
+        tags=" ".join(f'<span class=tg>{esc(t)}</span>' for t in m["tags"])
+        risk=' <span class=pill style="background:#fef3f2;color:%s">churn</span>'%BAD if m["churn"] else ""
+        cm_rows+=(f'<tr><td style="white-space:nowrap">{(m["ts"]+IST).strftime("%d %b %H:%M")}</td>'
+                  f'<td>{esc(m["group"])}</td><td>{esc(m["who"])}</td><td>{tags}{risk}</td>'
+                  f'<td>{esc(m["text"][:200])}</td></tr>')
+    if not cm_rows: cm_rows=f'<tr><td colspan=5 style="color:{OK};padding:14px">No concerning messages ✓</td></tr>'
+
+    # ---- topics (collapsible, small) ----
+    total_inb=max(inbound_total,1)
+    def bar(label,val,color):
+        pct=round(val/total_inb*100)
+        return (f'<div class=brow><div class=blab>{label}</div>'
+                f'<div class=btrack><div class=bfill style="width:{max(pct,2)}%;background:{color}"></div></div>'
+                f'<div class=bval>{val} <span style="color:{MUT}">({pct}%)</span></div></div>')
+    bars=(bar("Payment / billing",cat_counts.get("payment",0),"#2563eb")+
+          bar("Scheduling / cancellations",cat_counts.get("scheduling",0),"#7c3aed")+
+          bar("Academic / urgent",cat_counts.get("academic",0),"#0891b2")+
+          bar("Complaints / unhappy",cat_counts.get("complaint",0),BAD))
+
+    # ---- new students (tile + collapsible top 10) ----
+    ns_rows=""
+    for n in new_students[:10]:
+        st=(f'<span class=pill style="background:#fffaeb;color:{WARN}">awaiting</span>' if n["open"]
+            else f'<span class=pill style="background:#ecfdf3;color:{OK}">engaged</span>')
+        fr=fmt(n["first_resp"]) if n["first_resp"] is not None else "—"
+        ns_rows+=(f'<tr><td>{esc(n["group"])}</td><td style="white-space:nowrap">{(n["started"]+IST).strftime("%d %b")}</td>'
+                  f'<td style="text-align:center">{n["msgs"]}</td><td>{fr}</td>'
+                  f'<td style="text-align:right">{st}</td></tr>')
+    if not ns_rows: ns_rows=f'<tr><td colspan=5 style="color:{MUT};padding:12px">No new groups in the last 7 days</td></tr>'
+
+    # ---- weekly accountability: bottom 5 responders only ----
+    eligible=[r for r in s["staff_rows"] if r["handled"]>=10]
+    bottom5=sorted(eligible,key=lambda r:(r["within_pct"],-r["median_min"]))[:5]
+    st_rows=""
+    for r in bottom5:
+        col=OK if r["flag"]=="ok" else (BAD if r["flag"]=="look here" else WARN)
+        st_rows+=(f'<tr><td>{esc(r["name"])}</td>'
+                  f'<td>{r["handled"]}</td><td>{fmt(r["median_min"])}</td><td>{round(r["within_pct"])}%</td>'
+                  f'<td>{r["concerning"]}</td><td style="text-align:right;color:{col}">{r["flag"]}</td></tr>')
+    if not st_rows: st_rows=f'<tr><td colspan=6 style="color:{MUT};padding:10px">Not enough reply volume yet</td></tr>'
+    full_rows=""
+    for r in s["staff_rows"]:
+        col=OK if r["flag"]=="ok" else (BAD if r["flag"]=="look here" else WARN)
+        full_rows+=(f'<tr><td>{esc(r["name"])}</td><td style="color:{MUT}">{esc(r["phone"])}</td>'
+                    f'<td>{r["handled"]}</td><td>{fmt(r["median_min"])}</td><td>{round(r["within_pct"])}%</td>'
+                    f'<td>{r["concerning"]}</td><td style="text-align:right;color:{col}">{r["flag"]}</td></tr>')
+
+    review=sorted(((sid,len(g)) for sid,g in sender_groups.items() if len(g)>=2),key=lambda x:-x[1])
+    rv_rows="".join(
+        f'<tr><td>{esc(best_name(sid) or "—")}</td><td style="color:{MUT}">{esc(fmt_phone(sid))}</td>'
+        f'<td style="font-size:11px;color:{MUT}">{esc(sid)}</td><td>{c}</td>'
+        f'<td style="text-align:right">{"team" if sid in team else "—"}</td></tr>'
+        for sid,c in review[:80])
+
+    # ---- compact footer: reply speed + busiest hours side by side ----
+    maxd=max((c for _,c in dist),default=1) or 1
+    dist_rows=""
+    for lab,c in dist:
+        w=round(c/maxd*100)
+        col=OK if "min" in lab and "6" not in lab else (WARN if "2–6" in lab else (BAD if ">" in lab else "#0891b2"))
+        dist_rows+=(f'<div class=brow><div class=blab style="width:90px">{lab}</div>'
+                    f'<div class=btrack><div class=bfill style="width:{max(w,2)}%;background:{col}"></div></div>'
+                    f'<div class=bval style="width:52px">{c}</div></div>')
+    days=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
+    maxh=max((max(row) for row in heat),default=0) or 1
+    pk_d=pk_h=pk_v=0
+    for di,row in enumerate(heat):
+        for hh,v in enumerate(row):
+            if v>pk_v: pk_v,pk_d,pk_h=v,di,hh
+    hm="<div class=hmwrap><table class=hm><tr><th></th>"
+    for hh in range(24): hm+=f'<th>{hh if hh%6==0 else ""}</th>'
+    hm+="</tr>"
+    for di,row in enumerate(heat):
+        hm+=f"<tr><td class=hd>{days[di]}</td>"
+        for v in row:
+            a=v/maxh
+            bg=f"rgba(22,36,63,{a:.2f})" if v else "#f4f5f7"
+            hm+=f'<td class=hc style="background:{bg}"></td>'
+        hm+="</tr>"
+    hm+="</table></div>"
+    peak_note=f"Peak: {days[pk_d]} {pk_h:02d}:00 IST ({pk_v} msgs/hr)" if pk_v else ""
+
+    medcol=OK if (s["within_sla_pct"] or 0)>=90 else (WARN if (s["within_sla_pct"] or 0)>=75 else BAD)
+
+    team_strip=""
+    if team_tally:
+        cards=""
+        for slug,tl,ts in team_tally:
+            nc=BAD if ts["needs_attention"] else MUT
+            bc=BAD if ts["breached_open"] else MUT
+            rc=BAD if ts["accounts_at_risk"] else MUT
+            cards+=(f'<a class=teamcard href="{slug}"><div class=tt>{esc(tl)}</div>'
+                    f'<div class=tm><b style="color:{nc}">{ts["needs_attention"]}</b> to reply · '
+                    f'<b style="color:{bc}">{ts["breached_open"]}</b> breached · '
+                    f'<b style="color:{rc}">{ts["accounts_at_risk"]}</b> at risk</div></a>')
+        team_strip=f'<h2 style="margin-top:0">By team — where to look</h2><div class=teamgrid>{cards}</div>'
+
+    H=f"""<!DOCTYPE html><html><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<meta http-equiv=refresh content="{REFRESH_SECONDS}">
+<title>AP Guru — WhatsApp monitor</title>
+<style>
+*{{box-sizing:border-box}} body{{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:{INK};max-width:980px;margin:0 auto;padding:30px 22px;line-height:1.55}}
+.bar{{height:3px;width:46px;background:{NAVY};border-radius:2px;margin-bottom:14px}}
+h1{{font-size:22px;margin:0 0 2px}} .sub{{color:{MUT};font-size:13px;margin-bottom:22px}}
+.t5{{display:flex;gap:10px;align-items:flex-start;background:#f7f8fa;border:1px solid {LINE};border-radius:11px;padding:11px 14px;margin-bottom:7px;font-size:14px}}
+.teamgrid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:6px}}
+.teamcard{{display:block;background:#fff;border:1px solid {LINE};border-radius:11px;padding:12px 14px;text-decoration:none;color:{INK}}}
+.teamcard:hover{{border-color:{NAVY}}} .tt{{font-weight:600;font-size:14px;margin-bottom:3px}} .tm{{font-size:12px;color:{MUT}}}
+.t5i{{flex:none}}
+.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:11px;margin-bottom:10px}}
+.c{{background:#f7f8fa;border:1px solid {LINE};border-radius:11px;padding:13px}}
+.lbl{{font-size:12px;color:{MUT}}} .val{{font-size:23px;font-weight:600;margin-top:2px}} .csub{{font-size:11.5px;margin-top:3px}}
+h2{{font-size:15px;margin:30px 0 8px}} .sec{{font-size:12px;color:{MUT};margin:2px 0 14px}}
+table{{width:100%;border-collapse:collapse;font-size:13.5px}}
+th{{text-align:left;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:{MUT};padding:7px 8px;border-bottom:1px solid {LINE}}}
+td{{padding:8px;border-bottom:1px solid {LINE};vertical-align:top}}
+.pill{{font-size:11px;padding:2px 9px;border-radius:20px;font-weight:600;white-space:nowrap}}
+.tg{{font-size:10.5px;background:#eef2ff;color:{PUR};padding:1px 7px;border-radius:20px;margin-right:3px;white-space:nowrap}}
+.snip{{font-size:11.5px;color:{MUT};margin-top:3px;font-style:italic}}
+.note{{font-size:12px;color:{MUT};margin-top:8px}} details{{margin-top:8px}} summary{{cursor:pointer;font-size:13px;color:{NAVY}}}
+.duo{{display:grid;grid-template-columns:1fr 1fr;gap:26px}} @media(max-width:760px){{.duo{{grid-template-columns:1fr}}}}
+.hmwrap{{overflow-x:auto}} table.hm{{border-collapse:separate;border-spacing:1.5px;font-size:9.5px;width:auto}}
+table.hm th{{border:none;padding:0;text-align:center;width:15px;color:{MUT};font-size:9px;letter-spacing:0}}
+table.hm td.hc{{width:15px;height:13px;border:none;border-radius:2px;padding:0}}
+table.hm td.hd{{border:none;padding:0 7px 0 0;color:{MUT};font-size:10.5px;white-space:nowrap}}
+.brow{{display:flex;align-items:center;gap:9px;margin:5px 0}} .blab{{width:210px;font-size:12.5px}}
+.btrack{{flex:1;background:#f0f1f4;border-radius:6px;height:12px;overflow:hidden}} .bfill{{height:100%}}
+.bval{{width:96px;text-align:right;font-size:12px}}
+</style></head><body>
+<div class=bar></div>
+<h1>WhatsApp monitor · {html.escape(label)}</h1>
+<div class=sub>Updated {(as_of+IST).strftime('%d %b %Y, %H:%M')} IST · auto-refreshes every {REFRESH_SECONDS//60} min · SLA 2h (12pm–11pm IST) / 6h overnight · observer-only · {s.get("hidden_internal",0)} internal groups hidden</div>
+{team_strip}
+
+<h2 style="margin-top:0">Top 5 today</h2>
+{top5}
+
+<h2>At a glance</h2>
+<div class=cards>
+{card("Needs reply now", s["needs_attention"], BAD if s["needs_attention"] else OK)}
+{card("SLA breached", s["breached_open"], BAD if s["breached_open"] else OK, f'<span style="color:{WARN}">{s["breach_soon"]} breaching &lt;30m</span>' if s["breach_soon"] else "")}
+{card("Accounts at risk", s["accounts_at_risk"], BAD if s["accounts_at_risk"] else OK)}
+{card("Concerning (7d)", trend["conc"]["cur"], BAD if trend["conc"]["cur"]>trend["conc"]["prev"] else OK, delta_n(trend["conc"]["cur"],trend["conc"]["prev"]))}
+{card("Median reply (7d)", fmt(trend["med"]["cur"]), INK, delta_reply(trend["med"]["cur"],trend["med"]["prev"]))}
+{card("Within SLA (7d)", (str(round(trend["within"]["cur"]))+"%") if trend["within"]["cur"] is not None else "—", medcol, delta_pct(trend["within"]["cur"],trend["within"]["prev"]))}
+{card("New students (7d)", s["new_students"], INK)}
+</div>
+
+<h2>Act now — needs your reply <span style="font-weight:400;color:{MUT};font-size:12px">({s["needs_attention"]} threads · breached first, then breaching soon)</span></h2>
+<div class=sec>Only open threads whose last parent message needs a response. "Usually handled by" = team member who replies most in that group.</div>
+<table><thead><tr><th>Student group</th><th>Last message from parent</th><th>Usually handled by</th><th>Waiting</th><th style="text-align:right">SLA</th></tr></thead><tbody>{at_rows}</tbody></table>
+<details><summary>Attachments awaiting acknowledgement — {len(attach_open)} (homework, screenshots, docs)</summary>
+<div class=sec>Last parent message is a file/media with no question. Worth a quick 👍 or "received", but not urgent.</div>
+<table><thead><tr><th>Student group</th><th>Waiting</th></tr></thead><tbody>{"".join(f'<tr><td>{esc(a["group"])}</td><td style="white-space:nowrap">{fmt(a["waiting_min"])}</td></tr>' for a in attach_open) or f'<tr><td colspan=2 style="color:{MUT};padding:10px">None</td></tr>'}</tbody></table>
+</details>
+<details><summary>Open but likely no reply needed — {s["fyi_open"]} FYI/statements</summary>
+<table><thead><tr><th>Student group</th><th>Last message</th><th>Waiting</th></tr></thead><tbody>{fyi_rows}</tbody></table>
+</details>
+
+<h2>Accounts at risk <span style="font-weight:400;color:{MUT};font-size:12px">(churn wording + problem groups, worst first)</span></h2>
+<div class=sec>Groups with refund/stop/complaint wording or repeated concerns and slow replies. Call these.</div>
+<table><thead><tr><th>Student group</th><th style="text-align:center">Churn flags</th><th style="text-align:center">Concerns</th><th>Latest concern</th><th>Median reply</th><th style="text-align:right">Status</th></tr></thead><tbody>{risk_rows}</tbody></table>
+
+<details><summary>All concerning messages — {len(concerning_msgs)} in last {LOOKBACK_DAYS} days</summary>
+<table><thead><tr><th>When</th><th>Group</th><th>From</th><th>Type</th><th>Message</th></tr></thead><tbody>{cm_rows}</tbody></table>
+</details>
+
+<details><summary>What parents message about — last {LOOKBACK_DAYS} days ({inbound_total} messages)</summary>
+{bars}
+</details>
+
+<details><summary>New students this week — {len(new_students)} groups (showing latest 10)</summary>
+<div class=sec>"First reply" = how fast we answered their first message — the first impression.</div>
+<table><thead><tr><th>Student group</th><th>Started</th><th style="text-align:center">Messages</th><th>First reply</th><th style="text-align:right">Status</th></tr></thead><tbody>{ns_rows}</tbody></table>
+</details>
+
+<h2>Team accountability <span style="font-weight:400;color:{MUT};font-size:12px">(bottom 5 responders, min 10 replies)</span></h2>
+<table><thead><tr><th>Team member</th><th>Replies</th><th>Median</th><th>Within SLA</th><th>Concerning handled</th><th style="text-align:right">Flag</th></tr></thead><tbody>{st_rows}</tbody></table>
+<details><summary>Full team table ({len(s["staff_rows"])} members)</summary>
+<table><thead><tr><th>Team member</th><th>Phone</th><th>Replies</th><th>Median</th><th>Within SLA</th><th>Concerning</th><th style="text-align:right">Flag</th></tr></thead><tbody>{full_rows}</tbody></table>
+<p class=note>"look here" = slow but not busy · "heavy load" = slow but above-median volume. Fix names in <b>staff_names.json</b>.</p>
+</details>
+<details><summary>Auto-detected team list — review once</summary>
+<table><thead><tr><th>Name</th><th>Phone</th><th>ID</th><th>Groups</th><th style="text-align:right">Treated as</th></tr></thead><tbody>{rv_rows}</tbody></table>
+</details>
+
+<h2>Operations snapshot</h2>
+<div class=duo>
+<div>
+<div class=sec style="margin-bottom:6px">Reply speed ({s["responses_measured"]} first replies)</div>
+{dist_rows}
+</div>
+<div>
+<div class=sec style="margin-bottom:6px">Busiest hours (IST) · {peak_note}</div>
+{hm}
+</div>
+</div>
+</body></html>"""
+    open(os.path.join(here,outfile),"w").write(H)
+
+if __name__=="__main__":
+    s,counts=build_report()
+    print(f"MASTER groups={s['groups']} inbound={s['inbound_messages']} needs={s['needs_attention']} "
+          f"at_risk={s['accounts_at_risk']} within={round(s['within_sla_pct']) if s['within_sla_pct'] is not None else '—'}%")
+    for label,n in counts.items():
+        if label!="All courses — master": print(f"  {label:20} needs_reply={n}")
