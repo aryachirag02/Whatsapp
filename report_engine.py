@@ -114,6 +114,9 @@ PARENT_NAME_RE = _matcher(PARENT_NAME_WORDS)
 
 def _clean(t): return (t or "").replace("’","'").replace("‘","'").lower()
 def is_media(t): return bool(t) and any(m in t.lower() for m in MEDIA_MARKERS)
+def disp(t):
+    """Text as shown on the dashboard: media/attachment placeholders -> clean tag."""
+    return "[media / attachment]" if is_media(t) else (t or "")
 def normalize(t):
     if not t: return ""
     return "".join(c for c in t.lower() if c.isalnum() or c.isspace() or c in "🙏👍❤️🙂").strip()
@@ -387,7 +390,7 @@ def analyze(recs, as_of, keep_gids=None):
             for e in groups[gid]:
                 if e["ts"]>info["latest_ts"] and (e["is_self"] or is_team(e["sid"])) and (e["text"] or "").strip():
                     who=best_name(e["sid"]) or ""
-                    treply={"who":who,"text":e["text"][:160]}
+                    treply={"who":who,"text":disp(e["text"])[:160]}
         at_risk.append({"gid":gid,"group":group_name[gid],"n":info["n"],"latest":info["latest"],
                         "team_reply":treply,
                         "ts":info["latest_ts"],"open":gid in awaiting_gids})
@@ -781,16 +784,29 @@ def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,atta
                     f'<div class=tm><b style="color:{nc}">{ts["needs_attention"]}</b> to reply · '
                     f'<b style="color:{bc}">{ts["breached_open"]}</b> breached · '
                     f'<b style="color:{rc}">{ts["accounts_at_risk"]}</b> at risk</div></a>')
-        team_strip=f'<h2 style="margin-top:0">By team — where to look</h2><div class=teamgrid>{cards}</div>'
+        team_strip=f'<details class=panel open><summary>By team — where to look</summary><div class=panelbody><div class=teamgrid>{cards}</div></div></details>'
 
     H=f"""<!DOCTYPE html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <meta http-equiv=refresh content="{REFRESH_SECONDS}">
 <title>AP Guru — WhatsApp monitor</title>
 <style>
-*{{box-sizing:border-box}} body{{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:{INK};max-width:980px;margin:0 auto;padding:30px 22px;line-height:1.55}}
-.bar{{height:3px;width:46px;background:{NAVY};border-radius:2px;margin-bottom:14px}}
-h1{{font-size:22px;margin:0 0 2px}} .sub{{color:{MUT};font-size:13px;margin-bottom:22px}}
+*{{box-sizing:border-box}} body{{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:{INK};margin:0;background:#eef1f6;line-height:1.55}}
+.sheet{{max-width:1010px;margin:26px auto;background:#fff;border:1px solid {LINE};border-radius:18px;padding:30px 34px;box-shadow:0 2px 8px rgba(16,24,40,.06)}}
+.brand{{max-width:1010px;margin:22px auto 0;padding:0 6px}} .brand img{{height:40px;width:auto}}
+.hdr{{margin-bottom:20px;padding-bottom:18px;border-bottom:1px solid {LINE}}}
+h1{{font-size:21px;margin:0 0 2px}} .sub{{color:{MUT};font-size:12.5px}}
+h2{{background:#f5f7fb;border-left:3px solid {NAVY};padding:8px 12px;border-radius:8px}}
+tbody tr:nth-child(even) td{{background:#fafbfd}}
+details.panel{{border:1px solid {LINE};border-radius:12px;margin:12px 0;background:#fff;overflow:hidden}}
+details.panel>summary{{list-style:none;cursor:pointer;padding:12px 15px;font-size:15px;font-weight:600;
+  background:#f5f7fb;border-left:3px solid {NAVY};display:flex;align-items:center;justify-content:space-between}}
+details.panel>summary::-webkit-details-marker{{display:none}}
+details.panel>summary::after{{content:"▸";color:{MUT};font-weight:400;transition:transform .15s}}
+details.panel[open]>summary::after{{transform:rotate(90deg)}}
+details.panel>summary .cap{{font-weight:400;color:{MUT};font-size:12px;margin-left:8px}}
+.panelbody{{padding:14px 15px 4px}}
+@media(max-width:760px){{.sheet{{margin:0;border-radius:0;padding:18px 14px}} table{{display:block;overflow-x:auto}} h1{{font-size:18px}}}}
 .t5{{display:flex;gap:10px;align-items:flex-start;background:#f7f8fa;border:1px solid {LINE};border-radius:11px;padding:11px 14px;margin-bottom:7px;font-size:14px}}
 .teamgrid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:6px}}
 .teamcard{{display:block;background:#fff;border:1px solid {LINE};border-radius:11px;padding:12px 14px;text-decoration:none;color:{INK}}}
@@ -816,15 +832,19 @@ table.hm td.hd{{border:none;padding:0 7px 0 0;color:{MUT};font-size:10.5px;white
 .btrack{{flex:1;background:#f0f1f4;border-radius:6px;height:12px;overflow:hidden}} .bfill{{height:100%}}
 .bval{{width:96px;text-align:right;font-size:12px}}
 </style></head><body>
-<div class=bar></div>
+<div class=brand><img src="logo.png" alt="AP Guru" onerror="this.style.display='none'"></div>
+<div class=sheet>
+<div class=hdr>
 <h1>WhatsApp monitor · {html.escape(label)}</h1>
 <div class=sub>Updated {(as_of+IST).strftime('%d %b %Y, %H:%M')} IST · auto-refreshes every {REFRESH_SECONDS//60} min · SLA 2h (12pm–11pm IST) / 6h overnight · observer-only · {s.get("hidden_internal",0)} internal groups hidden</div>
+</div>
 {team_strip}
 
-<h2 style="margin-top:0">Top 5 today</h2>
+<details class=panel open><summary>Top 5 today</summary><div class=panelbody>
 {top5}
+</div></details>
 
-<h2>At a glance</h2>
+<details class=panel open><summary>At a glance</summary><div class=panelbody>
 <div class=cards>
 {card("Needs reply now", s["needs_attention"], BAD if s["needs_attention"] else OK)}
 {card("SLA breached", s["breached_open"], BAD if s["breached_open"] else OK, f'<span style="color:{WARN}">{s["breach_soon"]} breaching &lt;30m</span>' if s["breach_soon"] else "")}
@@ -833,8 +853,9 @@ table.hm td.hd{{border:none;padding:0 7px 0 0;color:{MUT};font-size:10.5px;white
 {card("Median reply (7d)", fmt(trend["med"]["cur"]), INK, delta_reply(trend["med"]["cur"],trend["med"]["prev"]))}
 {card("Within SLA (7d)", (str(round(trend["within"]["cur"]))+"%") if trend["within"]["cur"] is not None else "—", medcol, delta_pct(trend["within"]["cur"],trend["within"]["prev"]))}
 </div>
+</div></details>
 
-<h2>Act now — needs your reply <span style="font-weight:400;color:{MUT};font-size:12px">({s["needs_attention"]} threads · breached first, then breaching soon)</span></h2>
+<details class=panel open><summary>Act now — needs your reply <span class=cap>{s["needs_attention"]} threads · breached first, then breaching soon</span></summary><div class=panelbody>
 <div class=sec>Only open threads whose last parent message needs a response. "Usually handled by" = team member who replies most in that group.</div>
 <table><thead><tr><th>Student group</th><th>Last message from parent</th><th>Usually handled by</th><th>Waiting</th><th style="text-align:right">SLA</th></tr></thead><tbody>{at_rows}</tbody></table>
 <details><summary>Attachments awaiting acknowledgement — {len(attach_open)} (homework, screenshots, docs)</summary>
@@ -844,8 +865,9 @@ table.hm td.hd{{border:none;padding:0 7px 0 0;color:{MUT};font-size:10.5px;white
 <details><summary>Open but likely no reply needed — {s["fyi_open"]} FYI/statements</summary>
 <table><thead><tr><th>Student group</th><th>Last message</th><th>Waiting</th></tr></thead><tbody>{fyi_rows}</tbody></table>
 </details>
+</div></details>
 
-<h2>Accounts at risk <span style="font-weight:400;color:{MUT};font-size:12px">(churn wording + problem groups, worst first)</span></h2>
+<details class=panel open><summary>Accounts at risk <span class=cap>churn wording + problem groups, worst first</span></summary><div class=panelbody>
 <div class=sec>Groups with refund/stop/complaint wording, or a slow-service pattern (median reply &gt;2h). Call these.</div>
 <table><thead><tr><th>Student group</th><th style="text-align:center">Churn flags</th><th style="text-align:center">Concerns</th><th>Latest concern</th><th>Median reply</th><th style="text-align:right">Status</th></tr></thead><tbody>{risk_rows}</tbody></table>
 
@@ -856,9 +878,9 @@ table.hm td.hd{{border:none;padding:0 7px 0 0;color:{MUT};font-size:10.5px;white
 <details><summary>What parents message about — last {LOOKBACK_DAYS} days ({inbound_total} messages)</summary>
 {bars}
 </details>
+</div></details>
 
-
-<h2>Team accountability <span style="font-weight:400;color:{MUT};font-size:12px">(bottom 5 responders, min 10 replies)</span></h2>
+<details class=panel><summary>Team accountability <span class=cap>bottom 5 responders, min 10 replies</span></summary><div class=panelbody>
 <table><thead><tr><th>Team member</th><th>Replies</th><th>Median</th><th>Within SLA</th><th>Concerning handled</th><th style="text-align:right">Flag</th></tr></thead><tbody>{st_rows}</tbody></table>
 <details><summary>Full team table ({len(s["staff_rows"])} members)</summary>
 <table><thead><tr><th>Team member</th><th>Phone</th><th>Replies</th><th>Median</th><th>Within SLA</th><th>Concerning</th><th style="text-align:right">Flag</th></tr></thead><tbody>{full_rows}</tbody></table>
@@ -867,8 +889,9 @@ table.hm td.hd{{border:none;padding:0 7px 0 0;color:{MUT};font-size:10.5px;white
 <details><summary>Auto-detected team list — review once</summary>
 <table><thead><tr><th>Name</th><th>Phone</th><th>ID</th><th>Groups</th><th style="text-align:right">Treated as</th></tr></thead><tbody>{rv_rows}</tbody></table>
 </details>
+</div></details>
 
-<h2>Operations snapshot</h2>
+<details class=panel><summary>Operations snapshot</summary><div class=panelbody>
 <div class=duo>
 <div>
 <div class=sec style="margin-bottom:6px">Reply speed ({s["responses_measured"]} first replies)</div>
@@ -878,6 +901,8 @@ table.hm td.hd{{border:none;padding:0 7px 0 0;color:{MUT};font-size:10.5px;white
 <div class=sec style="margin-bottom:6px">Busiest hours (IST) · {peak_note}</div>
 {hm}
 </div>
+</div>
+</div></details>
 </div>
 </body></html>"""
     open(os.path.join(here,outfile),"w").write(H)
