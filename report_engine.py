@@ -584,23 +584,27 @@ def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,atta
     soon=[a for a in attention if a.get("breach_soon")]
     at_risk_open=[a for a in at_risk if a["open"]]
 
-    # ---- TOP 5 TODAY (auto-written, priority ordered) ----
+    # ---- TOP 5 TODAY (auto-written, priority ordered, with AI context) ----
     top=[]
     seen=set()
-    def add(icon,text,group=None):
+    def add(icon,text,group=None,aikey=None):
         key=group or text
         if key in seen or len(top)>=5: return
-        seen.add(key); top.append((icon,text))
+        summ=""
+        v=AI.get(aikey) if aikey else None
+        if v and v.get("summary"):
+            summ=f'<div class=t5s>🤖 {html.escape(v["summary"])}</div>'
+        seen.add(key); top.append((icon,text,summ))
     for a in breached:
         if a["concerning"]:
             ow=f" · usually {esc(a['owner'])}" if a.get("owner") else ""
-            add("🔴",f"<b>{esc(a['group'])}</b> — concerning message waiting <b>{fmt(a['waiting_min'])}</b>, SLA breached{ow}",a["group"])
+            add("🔴",f"<b>{esc(a['group'])}</b> — concerning message waiting <b>{fmt(a['waiting_min'])}</b>, SLA breached{ow}",a["group"],a.get("ctx_key"))
     for r in at_risk_open:
         snip=esc((r["latest"] or "")[:90])
-        add("🔴",f"Churn risk unanswered: <b>{esc(r['group'])}</b> — “{snip}…”",r["group"])
+        add("🔴",f"Churn risk unanswered: <b>{esc(r['group'])}</b> — “{snip}…”",r["group"],AI_KEYS.get(r.get("gid")))
     for a in breached:
         ow=f" · usually {esc(a['owner'])}" if a.get("owner") else ""
-        add("🔴",f"<b>{esc(a['group'])}</b> — {esc(a['need_type'])} waiting <b>{fmt(a['waiting_min'])}</b>, SLA breached{ow}",a["group"])
+        add("🔴",f"<b>{esc(a['group'])}</b> — {esc(a['need_type'])} waiting <b>{fmt(a['waiting_min'])}</b>, SLA breached{ow}",a["group"],a.get("ctx_key"))
     if soon:
         add("🟠",f"<b>{len(soon)} thread{'s' if len(soon)!=1 else ''}</b> breach SLA within 30 min — save these first")
     if trend["conc"]["cur"]>trend["conc"]["prev"]:
@@ -613,8 +617,8 @@ def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,atta
     if ns_open:
         add("🟠",f"<b>{len(ns_open)} new student group{'s' if len(ns_open)!=1 else ''}</b> awaiting a reply — first impressions at stake")
     if not top:
-        top.append(("🟢","All clear — no breaches, no churn risks, nothing urgent"))
-    top5="".join(f'<div class=t5><span class=t5i>{i}</span><span>{t}</span></div>' for i,t in top)
+        top.append(("🟢","All clear — no breaches, no churn risks, nothing urgent",""))
+    top5="".join(f'<div class=t5><span class=t5i>{i}</span><span>{t}{su}</span></div>' for i,t,su in top)
 
     # ---- ACT NOW table (breached → breaching soon → rest, with owner) ----
     TYPE_COL={"concerning":BAD,"question":"#0891b2","request":PUR,"attachment":WARN}
@@ -791,7 +795,7 @@ h1{{font-size:22px;margin:0 0 2px}} .sub{{color:{MUT};font-size:13px;margin-bott
 .teamgrid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:6px}}
 .teamcard{{display:block;background:#fff;border:1px solid {LINE};border-radius:11px;padding:12px 14px;text-decoration:none;color:{INK}}}
 .teamcard:hover{{border-color:{NAVY}}} .tt{{font-weight:600;font-size:14px;margin-bottom:3px}} .tm{{font-size:12px;color:{MUT}}}
-.t5i{{flex:none}}
+.t5i{{flex:none}} .t5s{{font-size:12.5px;color:{PUR};margin-top:3px;font-weight:400}}
 .cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:11px;margin-bottom:10px}}
 .c{{background:#f7f8fa;border:1px solid {LINE};border-radius:11px;padding:13px}}
 .lbl{{font-size:12px;color:{MUT}}} .val{{font-size:23px;font-weight:600;margin-top:2px}} .csub{{font-size:11.5px;margin-top:3px}}
