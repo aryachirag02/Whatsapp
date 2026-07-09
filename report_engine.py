@@ -381,7 +381,15 @@ def analyze(recs, as_of, keep_gids=None):
     at_risk=[]
     awaiting_gids={a["gid"] for a in awaiting}
     for gid,info in churn_groups.items():
+        # what did the team say back after the latest concern? (oversight view)
+        treply=None
+        if info["latest_ts"] and groups.get(gid):
+            for e in groups[gid]:
+                if e["ts"]>info["latest_ts"] and (e["is_self"] or is_team(e["sid"])) and (e["text"] or "").strip():
+                    who=best_name(e["sid"]) or ""
+                    treply={"who":who,"text":e["text"][:160]}
         at_risk.append({"gid":gid,"group":group_name[gid],"n":info["n"],"latest":info["latest"],
+                        "team_reply":treply,
                         "ts":info["latest_ts"],"open":gid in awaiting_gids})
     at_risk.sort(key=lambda x:(-x["n"],-x["ts"].timestamp()))
 
@@ -646,7 +654,7 @@ def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,atta
     for g in list(churn_by_group)+list(wl_by_group):
         if g in merged: continue
         cr=churn_by_group.get(g); wl=wl_by_group.get(g)
-        merged[g]={"group":g,
+        merged[g]={"group":g,"team_reply":(cr.get("team_reply") if cr else None),
                    "churn":(cr["n"] if cr else (wl["churn"] if wl else 0)),
                    "concern":(wl["concern"] if wl else (cr["n"] if cr else 0)),
                    "latest":((cr["latest"] if cr else "") or latest_conc.get(g,"")),
@@ -659,10 +667,14 @@ def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,atta
             else f'<span class=pill style="background:#ecfdf3;color:{OK}">replied</span>')
         lat=esc((m["latest"] or "")[:130]) or f'<span style="color:{MUT}">— no flagged wording; listed for slow-service pattern (median reply &gt;2h)</span>'
         aik=ai_key_by_group.get(m["group"])
+        tr=m.get("team_reply")
+        treply_html=(f'<div class=snip style="color:{OK};font-style:normal">&#8618; '
+                     f'{(esc(tr["who"]) + ": ") if tr and tr.get("who") else ""}'
+                     f'{esc(tr["text"])}</div>') if tr else ""
         risk_rows+=(f'<tr><td>{esc(m["group"])}{ai_line(aik) if aik else ""}</td>'
                     f'<td style="text-align:center">{m["churn"] or "—"}</td>'
                     f'<td style="text-align:center">{m["concern"] or "—"}</td>'
-                    f'<td>{lat}</td>'
+                    f'<td>{lat}{treply_html}</td>'
                     f'<td style="white-space:nowrap">{fmt(m["median"])}</td>'
                     f'<td style="text-align:right">{st}</td></tr>')
     if not risk_rows: risk_rows=f'<tr><td colspan=6 style="color:{OK};padding:14px">No at-risk accounts ✓</td></tr>'
