@@ -64,7 +64,7 @@ jobs:
               "-J7zk8yNT5WV5L1ZjZJ40w": "myp",
               "KUgjojLpQnKSJmRxddvgvg": "else"
             },
-            "lookback_days": 3,
+            "lookback_days": 7,
             "exclude_keywords": ["coordination","content","grading","internal","team","staff","accounts","tracking","tech issues","payglocal","non sat"]
           }
           EOF
@@ -104,6 +104,7 @@ jobs:
           cp dashboard_myp.html    _site/myp.html
           cp dashboard_else.html   _site/else.html
           cp _worker.js            _site/_worker.js
+          cp logo.png              _site/logo.png 2>/dev/null || true
 
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@v3
