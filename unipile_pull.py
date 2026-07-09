@@ -19,7 +19,12 @@ from datetime import datetime, timezone, timedelta
 
 here = os.path.dirname(os.path.abspath(__file__))
 cfg  = json.load(open(os.path.join(here, "config.json")))
-API, DSN, ACCT = cfg["api_key"], cfg["dsn"].rstrip("/"), cfg["account_id"]
+API, DSN = cfg["api_key"], cfg["dsn"].rstrip("/")
+# Multi-account: config "accounts" = {account_id: team}. Back-compat: single account_id.
+_accts = cfg.get("accounts")
+if isinstance(_accts, dict):   ACCOUNTS = list(_accts.keys())
+elif isinstance(_accts, list): ACCOUNTS = list(_accts)
+else:                          ACCOUNTS = [cfg["account_id"]]
 LOOKBACK_DAYS = cfg.get("lookback_days", 14)
 STORE_TEXT    = cfg.get("store_text", True)
 INCREMENTAL   = cfg.get("incremental", True)
@@ -53,12 +58,12 @@ def api_get(path, params):
     with urllib.request.urlopen(req, timeout=60) as r:
         return json.load(r)
 
-def list_group_chats():
+def list_group_chats(acct):
     """Starting list = named groups (type 1), not internal, with activity in the
     last LOOKBACK_DAYS. Returns [(id, name, last_activity_dt)]."""
     chats, cursor, total, named, stale, excl = [], None, 0, 0, 0, 0
     while True:
-        p = {"account_id": ACCT, "limit": 100}
+        p = {"account_id": acct, "limit": 100}
         if cursor: p["cursor"] = cursor
         data = api_get("chats", p)
         items = data.get("items", [])
@@ -122,7 +127,7 @@ def resolve_sender(m, amap):
         is_self = int(m.get("is_sender") or 0)
     return sender, name, push, is_self
 
-def pull_messages(chat_id, name, amap, since):
+def pull_messages(chat_id, name, amap, since, acct):
     """Fetch messages newest-first; stop once older than `since`."""
     out, cursor = [], None
     while True:
@@ -141,6 +146,7 @@ def pull_messages(chat_id, name, amap, since):
             text = m.get("text") or ""
             mid = m.get("id") or m.get("provider_id") or f"{chat_id}:{m.get('timestamp')}:{sender}"
             out.append({"mid": mid, "group_id": chat_id, "group_name": name,
+                        "account_id": acct,
                         "timestamp": m.get("timestamp"), "sender": sender,
                         "sender_name": sname, "push_name": push, "is_self": is_self,
                         "has_attachment": bool(m.get("attachments")),
@@ -182,28 +188,34 @@ def main():
     incr = bool(last_run and have_store)
     overlap = (last_run - timedelta(minutes=OVERLAP_MIN)) if incr else cutoff
     print(f"Pull mode: {'incremental' if incr else 'full backfill'} "
-          f"({LOOKBACK_DAYS}d window); store has {len(store)} messages")
+          f"({LOOKBACK_DAYS}d window); store has {len(store)} messages; "
+          f"{len(ACCOUNTS)} account(s)")
 
-    groups = list_group_chats()
+    # gather chats across every connected account (program head = team)
+    all_chats = []                      # (acct, gid, name, ts)
+    for acct in ACCOUNTS:
+        print(f"Account {acct}:")
+        for gid, name, ts in list_group_chats(acct):
+            all_chats.append((acct, gid, name, ts))
     known = {r["group_id"] for r in store.values()}
 
     # Decide per group: backfill brand-new groups fully; otherwise only fetch new.
-    todo = []   # (gid, name, since_for_this_group)
-    for gid, name, ts in groups:
+    todo = []   # (acct, gid, name, since_for_this_group)
+    for acct, gid, name, ts in all_chats:
         if gid not in known:
-            todo.append((gid, name, cutoff))                 # new group -> full backfill
+            todo.append((acct, gid, name, cutoff))           # new group -> full backfill
         elif (not incr) or (ts is None) or (ts >= overlap):
-            todo.append((gid, name, overlap))                # has new activity -> increment
+            todo.append((acct, gid, name, overlap))          # has new activity -> increment
         # else: in store and no new activity -> skip
-    new_groups = sum(1 for g in todo if g[2] is cutoff)
-    print(f"  {len(groups)} groups in window; fetching {len(todo)} "
+    new_groups = sum(1 for g in todo if g[3] is cutoff)
+    print(f"  {len(all_chats)} groups across accounts; fetching {len(todo)} "
           f"({new_groups} new backfills, {len(todo)-new_groups} updates)")
 
     fetched = 0
-    for i, (gid, name, gsince) in enumerate(todo, 1):
+    for i, (acct, gid, name, gsince) in enumerate(todo, 1):
         try:
             amap = attendee_map(gid, directory)
-            for r in pull_messages(gid, name, amap, gsince):
+            for r in pull_messages(gid, name, amap, gsince, acct):
                 store[ckey(r)] = r; fetched += 1
         except Exception as e:
             print(f"  ! {name}: {e}")

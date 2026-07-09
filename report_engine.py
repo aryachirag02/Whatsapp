@@ -473,6 +473,7 @@ TEAMS=[("myp",  "MYP / UK admissions tests", r"\bmyp\b|\bucat\b|\btmua\b|\blnat\
        ("igcse","IGCSE / A-Level / GCSE",    r"igcse|\bgcse\b|a-?level|as-?level|o-?level|cambridge|edexcel|\bcaie\b"),
        ("else", "Everything else",           r".*")]
 _TEAM_OVER={k:v for k,v in _cfg.get("team_overrides",{}).items()}
+_ACCT_TEAM=_cfg.get("accounts",{}) if isinstance(_cfg.get("accounts"),dict) else {}
 _TEAM_RE=[(slug,label,re.compile(pat,re.I)) for slug,label,pat in TEAMS]
 def team_of(name):
     if name in _TEAM_OVER: return _TEAM_OVER[name]
@@ -488,11 +489,17 @@ def build_report(messages_path=None, as_of=None):
     recs=json.load(open(messages_path))
     as_of=as_of or datetime.now(timezone.utc)
 
-    # classify every group by name
-    gid_name={}; 
-    for r in recs: gid_name[r["group_id"]]=r.get("group_name") or r["group_id"]
+    # classify every group: by which program-head account it belongs to,
+    # falling back to name keywords for any group with no account tag
+    gid_name={}; gid_acct={}
+    for r in recs:
+        gid_name[r["group_id"]]=r.get("group_name") or r["group_id"]
+        a=r.get("account_id")
+        if a: gid_acct[r["group_id"]]=a
     team_gids=defaultdict(set)
-    for gid,nm in gid_name.items(): team_gids[team_of(nm)].add(gid)
+    for gid,nm in gid_name.items():
+        t=_ACCT_TEAM.get(gid_acct.get(gid)) or team_of(nm)
+        team_gids[t].add(gid)
 
     # master analysis = everything; its need_ctx is the union of all open threads
     master=analyze(recs, as_of, keep_gids=None)
