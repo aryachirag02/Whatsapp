@@ -7,7 +7,7 @@ name: WhatsApp monitor
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # ~every 30 min (GitHub may delay/skip under load)
+    - cron: "*/10 * * * *"   # ~every 10 min (GitHub may delay/skip under load)
   workflow_dispatch: {}       # manual "Run workflow" button
 
 concurrency:                  # never let two runs fight over the state cache
@@ -51,7 +51,14 @@ jobs:
           {
             "api_key": "${UNIPILE_API_KEY}",
             "dsn": "https://api49.unipile.com:17927",
-            "account_id": "KNO4Re-iTGSUBtC9OWhP5Q",
+            "accounts": {
+              "FbN6fZUpTfGcLfbjC9Nkig": "sat",
+              "mwKJGuboQdyIJRi_bg_-7A": "ap",
+              "dJZmfM7SRkKvZI_DIj_J4A": "ib",
+              "J1Rf7e92QWKq5KxTiwMqZA": "igcse",
+              "-J7zk8yNT5WV5L1ZjZJ40w": "myp",
+              "KUgjojLpQnKSJmRxddvgvg": "else"
+            },
             "lookback_days": 14,
             "exclude_keywords": ["coordination","content","grading","internal","team","staff","accounts","tracking","tech issues","payglocal","non sat"]
           }
