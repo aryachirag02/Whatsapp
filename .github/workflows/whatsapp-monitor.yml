@@ -76,7 +76,9 @@ jobs:
         run: |
           curl -fsS -u "$DASH_USER:$DASH_PASS" https://apguru-whatsapp.pages.dev/api/flags \
             -o flagged_groups.json || echo '{}' > flagged_groups.json
-          python -c "import json;d=json.load(open('flagged_groups.json'));print(f'{len(d)} flagged groups excluded')"
+          # If the response isn't valid JSON (e.g. old worker served HTML), fall back to no flags.
+          python -c "import json;json.load(open('flagged_groups.json'))" 2>/dev/null || echo '{}' > flagged_groups.json
+          python -c "import json;print(len(json.load(open('flagged_groups.json'))),'flagged groups excluded')"
 
       - name: Pull messages (READ-ONLY)
         env:
