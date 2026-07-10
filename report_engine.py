@@ -33,6 +33,11 @@ except Exception:
     _cfg = {}
 LOOKBACK_DAYS = _cfg.get("lookback_days", 30)
 # groups whose NAME contains any of these are treated as internal and hidden
+try:
+    FLAGGED_INFO=json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)),"flagged_groups.json")))
+except Exception:
+    FLAGGED_INFO={}
+FLAGGED=set(FLAGGED_INFO.keys())
 EXCLUDE_GROUP_WORDS = [w.lower() for w in _cfg.get("exclude_group_words",
     _cfg.get("exclude_keywords", ["coordination","content","grading","internal","team","staff",
              "accounts","tracking","tech issues","payglocal","non sat"]))]
@@ -114,6 +119,26 @@ PARENT_NAME_RE = _matcher(PARENT_NAME_WORDS)
 
 def _clean(t): return (t or "").replace("’","'").replace("‘","'").lower()
 def is_media(t): return bool(t) and any(m in t.lower() for m in MEDIA_MARKERS)
+def biz_minutes(a,b):
+    """Minutes between two UTC datetimes, excluding 22:00-06:00 IST (team off-hours)."""
+    if not a or not b or b<=a: return 0
+    total=0.0; cur=a
+    while cur<b:
+        l=cur+IST
+        if 6<=l.hour<22:
+            end_biz=l.replace(hour=22,minute=0,second=0,microsecond=0)
+            seg_end=min(b+IST,end_biz)
+            total+=(seg_end-l).total_seconds()/60
+            cur=seg_end-IST
+        else:
+            nxt=(l+timedelta(days=1)).replace(hour=6,minute=0,second=0,microsecond=0) if l.hour>=22                 else l.replace(hour=6,minute=0,second=0,microsecond=0)
+            cur=min(b,nxt-IST)
+    return round(total)
+
+def when(ts):
+    """Short IST timestamp for display, e.g. '09 Jul, 21:14'."""
+    return (ts+IST).strftime("%d %b, %H:%M") if ts else ""
+
 def disp(t):
     """Text as shown on the dashboard: media/attachment placeholders -> clean tag."""
     return "[media / attachment]" if is_media(t) else (t or "")
@@ -283,7 +308,7 @@ def analyze(recs, as_of, keep_gids=None):
         gname=(group_name.get(gid) or "").lower()
         senders={e["sid"] for e in evs if e["sid"]}
         # internal = only team/self ever spoke, or name matches exclude words
-        if (senders and senders<=team) or any(w in gname for w in EXCLUDE_GROUP_WORDS):
+        if (senders and senders<=team) or any(w in gname for w in EXCLUDE_GROUP_WORDS) or gid in FLAGGED:
             hidden_internal+=1; continue
         if keep_gids is not None and gid not in keep_gids:
             continue
@@ -317,7 +342,7 @@ def analyze(recs, as_of, keep_gids=None):
             else:
                 if e["sid"]: gowner[gid][e["sid"]]+=1
                 if waiting:
-                    mins=(e["ts"]-start).total_seconds()/60
+                    mins=biz_minutes(start,e["ts"])   # excludes 10pm-6am IST
                     met=mins<=sla_hours_for(start)*60
                     all_resp.append((mins,met,e["sid"])); resp_here.append((mins,met))
                     resp_period[half(start)].append((mins,met))
@@ -337,6 +362,7 @@ def analyze(recs, as_of, keep_gids=None):
                 own=best_name(osid) or fmt_phone(osid)
             remaining=sla_hours_for(start)*60-open_mins
             awaiting.append({"group":group_name[gid],"gid":gid,"waiting_min":open_mins,
+                             "last_ts":(last_inbound["ts"] if last_inbound else start),
                              "owner":own,"breach_soon":(met_open and remaining<=30),
                              "ctx_key":f"{gid}|{evs[-1]['ts'].isoformat()}",
                              "sla_h":sla_hours_for(start),"breached":not met_open,
@@ -390,7 +416,7 @@ def analyze(recs, as_of, keep_gids=None):
             for e in groups[gid]:
                 if e["ts"]>info["latest_ts"] and (e["is_self"] or is_team(e["sid"])) and (e["text"] or "").strip():
                     who=best_name(e["sid"]) or ""
-                    treply={"who":who,"text":disp(e["text"])[:160]}
+                    treply={"who":who,"text":disp(e["text"])[:160],"ts":e["ts"]}
         at_risk.append({"gid":gid,"group":group_name[gid],"n":info["n"],"latest":info["latest"],
                         "team_reply":treply,
                         "ts":info["latest_ts"],"open":gid in awaiting_gids})
@@ -412,7 +438,7 @@ def analyze(recs, as_of, keep_gids=None):
         score=concern + 2*churn + (3 if open_needs else 0) + (2 if cold else (1 if breached else 0)) + (1 if slow else 0)
         if score<=0: continue
         st=("cold" if cold else ("breached" if breached else ("open" if open_needs else "ok")))
-        watchlist.append({"group":pg["group"],"concern":concern,"churn":churn,
+        watchlist.append({"gid":pg["gid"],"group":pg["group"],"concern":concern,"churn":churn,
                           "median_min":pg["median_min"],"within_pct":pg["within_pct"],
                           "status":st,"score":score})
     watchlist.sort(key=lambda x:-x["score"]); watchlist=watchlist[:15]
@@ -563,9 +589,11 @@ def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,atta
         if not v or not v.get("summary"): return ""
         return f'<div class=snip style="color:{PUR};font-style:normal">🤖 {html.escape(v["summary"])}</div>'
     def esc(x): return html.escape(str(x))
-    def card(lbl,val,col=INK,sub=""):
+    def card(lbl,val,col=INK,sub="",target=""):
         sb=f'<div class=csub>{sub}</div>' if sub else ""
-        return f'<div class=c><div class=lbl>{lbl}</div><div class=val style="color:{col}">{val}</div>{sb}</div>'
+        t=f' data-t="{target}" style="cursor:pointer"' if target else ""
+        hint='<div class=csub style="color:#98a2b3">click to see groups</div>' if target else ""
+        return f'<div class=c{t}><div class=lbl>{lbl}</div><div class=val style="color:{col}">{val}</div>{sb}{hint}</div>'
 
     # ---- trend helpers (arrows shown ON the glance tiles) ----
     def delta_reply(cur,prev):
@@ -618,7 +646,8 @@ def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,atta
         add("🟠",f"Check in with <b>{esc(w['name'])}</b> — median reply {fmt(w['median_min'])}, {round(w['within_pct'])}% in SLA")
     ns_open=[n for n in new_students if n["open"]]
     if ns_open:
-        add("🟠",f"<b>{len(ns_open)} new student group{'s' if len(ns_open)!=1 else ''}</b> awaiting a reply — first impressions at stake")
+        _nsl="".join(f'<div class=mrow><b>{esc(n["group"])}</b> · started {(n["started"]+IST).strftime("%d %b")} · {n["msgs"]} msgs</div>' for n in ns_open[:15])
+        add("🟠",f"<details style=\"display:inline\"><summary style=\"cursor:pointer;display:inline\"><b>{len(ns_open)} new student group{'s' if len(ns_open)!=1 else ''}</b> awaiting a reply — first impressions at stake <span style=\"color:{MUT};font-size:12px\">(click to see)</span></summary>{_nsl}</details>")
     if not top:
         top.append(("🟢","All clear — no breaches, no churn risks, nothing urgent",""))
     top5="".join(f'<div class=t5><span class=t5i>{i}</span><span>{t}{su}</span></div>' for i,t,su in top)
@@ -638,7 +667,9 @@ def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,atta
         ttag=f'<span class=tg style="background:#f3f4f6;color:{tcol}">{esc(typ)}</span>'
         msg=esc((a["last_text"] or "")[:150]) or "<span style='color:%s'>(attachment / media)</span>"%MUT
         ow=esc(a["owner"]) if a.get("owner") else "—"
-        at_rows+=(f'<tr><td>{esc(a["group"])}{ai_line(a.get("ctx_key",""))}</td><td>{ttag}<div class=snip>{msg}</div></td>'
+        nrb=f'<div><button class=nr data-gid="{esc(a["gid"])}" data-group="{esc(a["group"])}">not relevant?</button></div>'
+        sent=f'<div class=when>sent {when(a.get("last_ts"))} IST</div>' if a.get("last_ts") else ""
+        at_rows+=(f'<tr><td>{esc(a["group"])}{ai_line(a.get("ctx_key",""))}{nrb}</td><td>{ttag}<div class=snip>{msg}</div>{sent}</td>'
                   f'<td style="white-space:nowrap;color:{MUT}">{ow}</td>'
                   f'<td style="white-space:nowrap">{fmt(a["waiting_min"])}</td>'
                   f'<td style="text-align:right">{sla_pill(a)}</td></tr>')
@@ -646,14 +677,15 @@ def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,atta
 
     fyi_rows=""
     for a in fyi_open:
-        fyi_rows+=(f'<tr><td>{esc(a["group"])}</td><td><div class=snip>{esc((a["last_text"] or "")[:150])}</div></td>'
+        fyi_rows+=(f'<tr><td>{esc(a["group"])}</td><td><div class=snip>{esc((a["last_text"] or "")[:150])}</div>'
+                   f'<div class=when>sent {when(a.get("last_ts"))} IST</div></td>'
                    f'<td style="white-space:nowrap">{fmt(a["waiting_min"])}</td></tr>')
     if not fyi_rows: fyi_rows=f'<tr><td colspan=3 style="color:{MUT};padding:10px">None</td></tr>'
 
     # ---- AT RISK (churn watch merged with problem-group watchlist) ----
-    latest_conc={}   # group name -> most recent concerning text (fallback)
+    latest_conc={}   # group name -> most recent concerning msg (text+ts fallback)
     for m in concerning_msgs:                       # already sorted newest first
-        latest_conc.setdefault(m["group"],m["text"])
+        latest_conc.setdefault(m["group"],m)
     ai_key_by_group={r["group"]:AI_KEYS.get(r["gid"]) for r in at_risk if r.get("gid")}
     churn_by_group={r["group"]:r for r in at_risk}
     wl_by_group={w["group"]:w for w in watchlist}
@@ -661,10 +693,12 @@ def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,atta
     for g in list(churn_by_group)+list(wl_by_group):
         if g in merged: continue
         cr=churn_by_group.get(g); wl=wl_by_group.get(g)
-        merged[g]={"group":g,"team_reply":(cr.get("team_reply") if cr else None),
+        merged[g]={"group":g,"gid":(cr.get("gid") if cr else (wl.get("gid") if wl else None)),
+                   "team_reply":(cr.get("team_reply") if cr else None),
                    "churn":(cr["n"] if cr else (wl["churn"] if wl else 0)),
                    "concern":(wl["concern"] if wl else (cr["n"] if cr else 0)),
-                   "latest":((cr["latest"] if cr else "") or latest_conc.get(g,"")),
+                   "latest":((cr["latest"] if cr else "") or (latest_conc.get(g,{}) or {}).get("text","")),
+                   "latest_ts":((cr.get("ts") if cr else None) or (latest_conc.get(g,{}) or {}).get("ts")),
                    "median":(wl["median_min"] if wl else None),
                    "open":(cr["open"] if cr else (wl["status"] in ("open","breached","cold") if wl else False)),
                    "score":((wl["score"] if wl else 0)+(cr["n"]*2 if cr else 0))}
@@ -673,12 +707,17 @@ def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,atta
         st=(f'<span class=pill style="background:#fef3f2;color:{BAD}">awaiting reply</span>' if m["open"]
             else f'<span class=pill style="background:#ecfdf3;color:{OK}">replied</span>')
         lat=esc((m["latest"] or "")[:130]) or f'<span style="color:{MUT}">— no flagged wording; listed for slow-service pattern (median reply &gt;2h)</span>'
+        if m.get("latest") and m.get("latest_ts"):
+            lat+=f'<div class=when>sent {when(m["latest_ts"])} IST</div>'
         aik=ai_key_by_group.get(m["group"])
         tr=m.get("team_reply")
         treply_html=(f'<div class=snip style="color:{OK};font-style:normal">&#8618; '
                      f'{(esc(tr["who"]) + ": ") if tr and tr.get("who") else ""}'
-                     f'{esc(tr["text"])}</div>') if tr else ""
-        risk_rows+=(f'<tr><td>{esc(m["group"])}{ai_line(aik) if aik else ""}</td>'
+                     f'{esc(tr["text"])}'
+                     f'{(" <span class=when>· " + when(tr["ts"]) + " IST</span>") if tr.get("ts") else ""}</div>') if tr else ""
+        nrb=(f'<div><button class=nr data-gid="{esc(m["gid"])}" data-group="{esc(m["group"])}">not relevant?</button></div>'
+             if m.get("gid") else "")
+        risk_rows+=(f'<tr><td>{esc(m["group"])}{ai_line(aik) if aik else ""}{nrb}</td>'
                     f'<td style="text-align:center">{m["churn"] or "—"}</td>'
                     f'<td style="text-align:center">{m["concern"] or "—"}</td>'
                     f'<td>{lat}{treply_html}</td>'
@@ -771,7 +810,42 @@ def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,atta
     hm+="</table></div>"
     peak_note=f"Peak: {days[pk_d]} {pk_h:02d}:00 IST ({pk_v} msgs/hr)" if pk_v else ""
 
+    # drill-down lists behind the glance tiles
+    def _ai_txt(key):
+        v=AI.get(key) if key else None
+        return f' <span style="color:{PUR}">🤖 {html.escape(v["summary"])}</span>' if v and v.get("summary") else ""
+    def _mini(rows):
+        if not rows: return f'<div style="color:{MUT};padding:8px">None</div>'
+        return "".join(f'<div class=mrow>{r}</div>' for r in rows[:40])
+    l_needs=_mini([f'<b>{esc(a["group"])}</b> · waiting {fmt(a["waiting_min"])}{_ai_txt(a.get("ctx_key"))}' for a in attention])
+    _all_open=attention+fyi_open+attach_open
+    l_breach=_mini([f'<b>{esc(a["group"])}</b> · {esc(a["need_type"])} · waiting {fmt(a["waiting_min"])}{_ai_txt(a.get("ctx_key"))}'
+                    for a in sorted([x for x in _all_open if x["breached"]],key=lambda x:-x["waiting_min"])])
+    l_risk=_mini([f'<b>{esc(m["group"])}</b> · {esc((m["latest"] or "")[:110]) or "slow-service pattern"}{_ai_txt(ai_key_by_group.get(m["group"]))}'
+                  for m in sorted(merged.values(),key=lambda x:-x["score"])[:40]])
+    _wk=as_of-timedelta(days=7)
+    l_conc=_mini([f'<b>{esc(m["group"])}</b> · {esc(m["text"][:120])}' for m in concerning_msgs if m["ts"]>=_wk])
+    tile_lists=(f'<div class=tlist id=tl-needs>{l_needs}</div>'
+                f'<div class=tlist id=tl-breach>{l_breach}</div>'
+                f'<div class=tlist id=tl-risk>{l_risk}</div>'
+                f'<div class=tlist id=tl-conc>{l_conc}</div>')
+
     medcol=OK if (s["within_sla_pct"] or 0)>=90 else (WARN if (s["within_sla_pct"] or 0)>=75 else BAD)
+
+    flags_panel=""
+    if team_tally is not None and True:   # master view only
+        if FLAGGED_INFO:
+            rows="".join(
+                f'<tr><td>{esc(v.get("group") or gid)}</td><td>{esc(v.get("reason",""))}</td>'
+                f'<td style="white-space:nowrap;color:{MUT}">{esc(v.get("by",""))}</td>'
+                f'<td style="white-space:nowrap;color:{MUT}">{esc((v.get("ts") or "")[:16].replace("T"," "))} UTC</td></tr>'
+                for gid,v in sorted(FLAGGED_INFO.items(), key=lambda kv:kv[1].get("ts",""), reverse=True))
+            body=f'<table><thead><tr><th>Group</th><th>Reason given</th><th>Flagged by</th><th>When</th></tr></thead><tbody>{rows}</tbody></table>'
+        else:
+            body=f'<div style="color:{MUT};padding:6px 2px">No groups flagged yet. The team can flag noise with the "not relevant?" buttons.</div>'
+        flags_panel=(f'<details class=panel><summary>Flagged as not relevant <span class=cap>{len(FLAGGED_INFO)} groups excluded from monitoring · review weekly</span></summary>'
+                     f'<div class=panelbody>{body}'
+                     f'<p class=note>To un-flag a group, delete its entry in the Cloudflare KV namespace (apguru-flags) — it returns on the next run.</p></div></details>')
 
     team_strip=""
     if team_tally:
@@ -806,6 +880,11 @@ details.panel>summary::after{{content:"▸";color:{MUT};font-weight:400;transiti
 details.panel[open]>summary::after{{transform:rotate(90deg)}}
 details.panel>summary .cap{{font-weight:400;color:{MUT};font-size:12px;margin-left:8px}}
 .panelbody{{padding:14px 15px 4px}}
+.nr{{font-size:10.5px;color:{MUT};background:#f3f4f6;border:1px solid {LINE};border-radius:20px;padding:1px 8px;margin-top:5px;cursor:pointer}}
+.nr:hover{{background:#e9eaee}}
+.tlist{{display:none;margin-top:12px;border-top:1px solid {LINE};padding-top:10px}}
+.mrow{{font-size:12.5px;padding:5px 2px;border-bottom:1px solid #f1f2f5}}
+.when{{font-size:10.5px;color:#98a2b3;margin-top:2px}}
 @media(max-width:760px){{.sheet{{margin:0;border-radius:0;padding:18px 14px}} table{{display:block;overflow-x:auto}} h1{{font-size:18px}}}}
 .t5{{display:flex;gap:10px;align-items:flex-start;background:#f7f8fa;border:1px solid {LINE};border-radius:11px;padding:11px 14px;margin-bottom:7px;font-size:14px}}
 .teamgrid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:6px}}
@@ -836,7 +915,7 @@ table.hm td.hd{{border:none;padding:0 7px 0 0;color:{MUT};font-size:10.5px;white
 <div class=sheet>
 <div class=hdr>
 <h1>WhatsApp monitor · {html.escape(label)}</h1>
-<div class=sub>Updated {(as_of+IST).strftime('%d %b %Y, %H:%M')} IST · auto-refreshes every {REFRESH_SECONDS//60} min · SLA 2h (12pm–11pm IST) / 6h overnight · observer-only · {s.get("hidden_internal",0)} internal groups hidden</div>
+<div class=sub>Updated {(as_of+IST).strftime('%d %b %Y, %H:%M')} IST · refreshes ~every 30 min during peak (9:30am–8pm IST), hourly mornings &amp; evenings · SLA 2h (12pm–11pm IST) / 6h overnight · reply times exclude 10pm–6am IST</div>
 </div>
 {team_strip}
 
@@ -846,13 +925,14 @@ table.hm td.hd{{border:none;padding:0 7px 0 0;color:{MUT};font-size:10.5px;white
 
 <details class=panel open><summary>At a glance</summary><div class=panelbody>
 <div class=cards>
-{card("Needs reply now", s["needs_attention"], BAD if s["needs_attention"] else OK)}
-{card("SLA breached", s["breached_open"], BAD if s["breached_open"] else OK, f'<span style="color:{WARN}">{s["breach_soon"]} breaching &lt;30m</span>' if s["breach_soon"] else "")}
-{card("Accounts at risk", s["accounts_at_risk"], BAD if s["accounts_at_risk"] else OK)}
-{card("Concerning (7d)", trend["conc"]["cur"], BAD if trend["conc"]["cur"]>trend["conc"]["prev"] else OK, delta_n(trend["conc"]["cur"],trend["conc"]["prev"]))}
+{card("Needs reply now", s["needs_attention"], BAD if s["needs_attention"] else OK, target="tl-needs")}
+{card("SLA breached", s["breached_open"], BAD if s["breached_open"] else OK, f'<span style="color:{WARN}">{s["breach_soon"]} breaching &lt;30m</span>' if s["breach_soon"] else "", target="tl-breach")}
+{card("Accounts at risk", s["accounts_at_risk"], BAD if s["accounts_at_risk"] else OK, target="tl-risk")}
+{card("Concerning (7d)", trend["conc"]["cur"], BAD if trend["conc"]["cur"]>trend["conc"]["prev"] else OK, delta_n(trend["conc"]["cur"],trend["conc"]["prev"]), target="tl-conc")}
 {card("Median reply (7d)", fmt(trend["med"]["cur"]), INK, delta_reply(trend["med"]["cur"],trend["med"]["prev"]))}
 {card("Within SLA (7d)", (str(round(trend["within"]["cur"]))+"%") if trend["within"]["cur"] is not None else "—", medcol, delta_pct(trend["within"]["cur"],trend["within"]["prev"]))}
 </div>
+{tile_lists}
 </div></details>
 
 <details class=panel open><summary>Act now — needs your reply <span class=cap>{s["needs_attention"]} threads · breached first, then breaching soon</span></summary><div class=panelbody>
@@ -903,7 +983,38 @@ table.hm td.hd{{border:none;padding:0 7px 0 0;color:{MUT};font-size:10.5px;white
 </div>
 </div>
 </div></details>
+{flags_panel}
 </div>
+<script>
+document.addEventListener('click',async function(e){{
+  var b=e.target.closest('.nr');
+  if(b){{
+    var reason=prompt("Why is this not relevant? (sent to Chirag to improve the system)");
+    if(reason===null) return;
+    b.disabled=true;b.textContent='saving…';
+    try{{
+      var r=await fetch('/api/flag',{{method:'POST',headers:{{'Content-Type':'application/json'}},
+        body:JSON.stringify({{gid:b.dataset.gid,group:b.dataset.group,reason:reason}})}});
+      if(!r.ok) throw 0;
+      b.textContent='flagged ✓';
+      var tr=b.closest('tr'); if(tr) tr.style.opacity=.35;
+    }}catch(err){{
+      b.disabled=false;b.textContent='not relevant?';
+      alert('Could not save the flag — is the FLAGS KV binding set up in Cloudflare?');
+    }}
+    return;
+  }}
+  var c=e.target.closest('[data-t]');
+  if(c){{
+    var el=document.getElementById(c.dataset.t);
+    if(el){{
+      var show=el.style.display!=='block';
+      document.querySelectorAll('.tlist').forEach(function(x){{x.style.display='none';}});
+      el.style.display=show?'block':'none';
+    }}
+  }}
+}});
+</script>
 </body></html>"""
     open(os.path.join(here,outfile),"w").write(H)
 
