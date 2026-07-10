@@ -915,7 +915,7 @@ table.hm td.hd{{border:none;padding:0 7px 0 0;color:{MUT};font-size:10.5px;white
 <div class=sheet>
 <div class=hdr>
 <h1>WhatsApp monitor · {html.escape(label)}</h1>
-<div class=sub>Updated {(as_of+IST).strftime('%d %b %Y, %H:%M')} IST · refreshes ~every 30 min during peak (9:30am–8pm IST), hourly mornings &amp; evenings · SLA 2h (12pm–11pm IST) / 6h overnight · reply times exclude 10pm–6am IST</div>
+<div class=sub>Updated {(as_of+IST).strftime('%d %b %Y, %H:%M')} IST · refreshes ~every 15 min during peak (9:30am–8pm IST), hourly mornings &amp; evenings · SLA 2h (12pm–11pm IST) / 6h overnight · reply times exclude 10pm–6am IST</div>
 </div>
 {team_strip}
 
@@ -986,6 +986,20 @@ table.hm td.hd{{border:none;padding:0 7px 0 0;color:{MUT};font-size:10.5px;white
 {flags_panel}
 </div>
 <script>
+// Hide already-flagged rows immediately on every page load (before the next
+// rebuild makes it permanent). Counts/tiles update on the next data refresh.
+fetch('/api/flags').then(function(r){{return r.ok?r.json():{{}};}}).then(function(f){{
+  var n=0;
+  document.querySelectorAll('.nr').forEach(function(b){{
+    if(f && f[b.dataset.gid]){{
+      var tr=b.closest('tr'); if(tr){{tr.style.display='none'; n++;}}
+    }}
+  }});
+  if(n){{
+    var sub=document.querySelector('.sub');
+    if(sub) sub.innerHTML+=' · <span style="color:#98a2b3">'+n+' flagged row'+(n>1?'s':'')+' hidden (counts update next refresh)</span>';
+  }}
+}}).catch(function(){{}});
 document.addEventListener('click',async function(e){{
   var b=e.target.closest('.nr');
   if(b){{
