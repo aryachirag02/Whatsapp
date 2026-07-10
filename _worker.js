@@ -40,6 +40,36 @@ export default {
       const pass = decoded.slice(i + 1);
       const u = users[email];
       if (u && pass === u.pass) {
+        const url0 = new URL(request.url);
+
+        // ---- feedback API: "Not relevant" flags (stored in KV binding FLAGS) ----
+        if (url0.pathname === "/api/flag" && request.method === "POST") {
+          if (!env.FLAGS) return new Response(JSON.stringify({ error: "KV binding FLAGS not configured" }),
+            { status: 503, headers: { "Content-Type": "application/json" } });
+          let d = {};
+          try { d = await request.json(); } catch {}
+          if (!d.gid) return new Response(JSON.stringify({ error: "gid required" }),
+            { status: 400, headers: { "Content-Type": "application/json" } });
+          await env.FLAGS.put("flag:" + d.gid, JSON.stringify({
+            group: (d.group || "").slice(0, 200),
+            reason: (d.reason || "").slice(0, 500),
+            by: email, ts: new Date().toISOString(),
+          }));
+          return new Response(JSON.stringify({ ok: true }),
+            { headers: { "Content-Type": "application/json" } });
+        }
+        if (url0.pathname === "/api/flags" && request.method === "GET") {
+          if (!env.FLAGS) return new Response("{}", { headers: { "Content-Type": "application/json" } });
+          const out = {};
+          const list = await env.FLAGS.list({ prefix: "flag:" });
+          for (const k of list.keys) {
+            const v = await env.FLAGS.get(k.name);
+            if (v) out[k.name.slice(5)] = JSON.parse(v);
+          }
+          return new Response(JSON.stringify(out, null, 1),
+            { headers: { "Content-Type": "application/json" } });
+        }
+
         const team = (u.team || "else").toLowerCase();
         const url = new URL(request.url);
         let p = url.pathname.replace(/\/+$/, "") || "/";
