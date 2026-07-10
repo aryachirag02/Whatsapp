@@ -69,6 +69,15 @@ jobs:
           }
           EOF
 
+      - name: Fetch "Not relevant" flags from the dashboard
+        env:
+          DASH_USER: ${{ secrets.DASHBOARD_USER }}
+          DASH_PASS: ${{ secrets.DASHBOARD_PASS }}
+        run: |
+          curl -fsS -u "$DASH_USER:$DASH_PASS" https://apguru-whatsapp.pages.dev/api/flags \
+            -o flagged_groups.json || echo '{}' > flagged_groups.json
+          python -c "import json;d=json.load(open('flagged_groups.json'));print(f'{len(d)} flagged groups excluded')"
+
       - name: Pull messages (READ-ONLY)
         env:
           UNIPILE_API_KEY: ${{ secrets.UNIPILE_API_KEY }}
