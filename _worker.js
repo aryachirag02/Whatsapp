@@ -14,7 +14,7 @@ const TEAM_PATH = {
   all: "/", sat: "/sat", ap: "/ap",
   ib: "/ib", igcse: "/igcse", myp: "/myp", else: "/else",
 };
-const OWNER_PATHS = new Set(["/", "/sat", "/ap", "/ib", "/igcse", "/myp", "/else"]);
+const OWNER_PATHS = new Set(["/", "/sat", "/ap", "/ib", "/igcse", "/myp", "/else", "/ceo"]);
 
 function unauthorized() {
   return new Response("Authentication required.", {
@@ -25,6 +25,19 @@ function unauthorized() {
 
 export default {
   async fetch(request, env) {
+    // Owner's worry list: ungated, protected only by an unguessable URL.
+    // Also served ungated on the anita.* hostname (owner's custom domain).
+    {
+      const u0 = new URL(request.url);
+      if (u0.hostname.startsWith("anita.")) {
+        u0.pathname = "/ceo";
+        return env.ASSETS.fetch(new Request(u0.toString(), request));
+      }
+      if (u0.pathname === "/ceo-a1e14bac51" || u0.pathname === "/ceo-a1e14bac51/") {
+        u0.pathname = "/ceo";
+        return env.ASSETS.fetch(new Request(u0.toString(), request));
+      }
+    }
     let users;
     try { users = JSON.parse(env.USERS || "{}"); }
     catch { return new Response("Auth config error (USERS not valid JSON).", { status: 503 }); }
