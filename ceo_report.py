@@ -76,7 +76,11 @@ def build():
                 f"{w['concern']} concerns this week", WARN, w["group"], "",
                 None, status=w.get("status"))
 
-    worry = sorted(items.values(), key=lambda x: -x["sev"])[:15]
+    seen_names=set(); worry=[]
+    for it in sorted(items.values(), key=lambda x: -x["sev"]):
+        if it["group"] in seen_names: continue
+        seen_names.add(it["group"]); worry.append(it)
+        if len(worry)>=15: break
 
     # ---------- render ----------
     rows = ""
@@ -107,7 +111,6 @@ def build():
     H = f"""<!DOCTYPE html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <meta http-equiv=refresh content="300">
-<meta name="robots" content="noindex,nofollow">
 <title>AP Guru — Owner's worry list</title>
 <style>
 *{{box-sizing:border-box}} body{{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#15171c;margin:0;background:#eef1f6;line-height:1.5}}
@@ -139,10 +142,20 @@ h1{{font-size:20px;margin:0 0 2px}} .sub{{color:#6b7280;font-size:12.5px;margin-
 var KEY='ceo_dismissed';
 function load(){{try{{return JSON.parse(localStorage.getItem(KEY))||{{}};}}catch(e){{return {{}};}}}}
 function save(d){{localStorage.setItem(KEY,JSON.stringify(d));}}
-var dism=load();
+var dism=load(); var hidden=0;
 document.querySelectorAll('.item').forEach(function(it){{
-  if(dism[it.dataset.key]) it.style.display='none';
+  if(dism[it.dataset.key]){{it.style.display='none'; hidden++;}}
 }});
+if(hidden){{
+  var note=document.querySelector('.note');
+  if(note){{
+    var a=document.createElement('a'); a.href='#';
+    a.textContent='Show '+hidden+' handled item'+(hidden>1?'s':'');
+    a.style.cssText='display:inline-block;margin-left:8px;color:#5b21b6;font-weight:600';
+    a.onclick=function(ev){{ev.preventDefault();localStorage.removeItem(KEY);location.reload();}};
+    note.appendChild(a);
+  }}
+}}
 document.addEventListener('click',function(e){{
   var b=e.target.closest('.done'); if(!b) return;
   var it=b.closest('.item');

@@ -30,7 +30,7 @@ export default {
     {
       const u0 = new URL(request.url);
       if (u0.hostname.startsWith("anita.")) {
-        u0.pathname = "/ceo";
+        if (u0.pathname !== "/logo.png") u0.pathname = "/ceo";
         return env.ASSETS.fetch(new Request(u0.toString(), request));
       }
       if (u0.pathname === "/ceo-a1e14bac51" || u0.pathname === "/ceo-a1e14bac51/") {
