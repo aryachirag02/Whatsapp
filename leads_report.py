@@ -26,7 +26,7 @@ import report_engine as eng
 
 here = os.path.dirname(os.path.abspath(__file__))
 MODEL = "claude-haiku-4-5-20251001"
-MAX_NEW_AI = 25
+MAX_NEW_AI = 60
 FOLLOWUP_HOURS = 48
 LEAD_WINDOW_DAYS = 14
 FROM_EMAIL = "aryachirag@apguru.com"
@@ -142,6 +142,9 @@ def parse_lead(raw):
     loc   = _field(f, "location", "city", "state", "country")
     school= _field(f, "school name", "school")
     msg   = _field(f, "field", "message", "requirement", "details", "comments")
+    # some leads put the FULL number in the dial-code field
+    if not phone and len(dial) >= 10:
+        phone, dial = dial, ""
     # phone may already embed the dial code, or appear inside the message
     if not phone:
         m = re.search(r"\+?(\d[\d\s\-()]{8,})", msg or "")
@@ -190,10 +193,14 @@ SYSTEM = (
  "Hi {first name},\\n\\nThis is Chirag from AP Guru. This is regarding {program} prep - "
  "you sent a message on our website.\\n\\nIt would be easier to discuss it over a call. "
  "Will you be available anytime between {window} this week?\\n"
- "The window: Chirag's slot is 7 am - 2 pm EASTERN. If the lead's US location implies "
- "another US timezone, convert that same absolute window to their zone (central 6 am - 1 pm, "
- "mountain 5 am - 12 pm, pacific 4 am - 11 am) and name the zone. If location is non-US or "
- "unclear, use '7 am - 2 pm eastern time'. "
+ "The window: Chirag's slots are 7 am - 2 pm OR post 10 pm, EASTERN. To pick the zone: "
+ "FIRST identify the US state from the location and school (e.g. 'Central Jersey College Prep' "
+ "-> New Jersey -> eastern). IGNORE words like Central/Pacific/Mountain appearing inside school "
+ "or city NAMES — they are not timezones. Map the state to its zone, then convert BOTH slots and "
+ "phrase as 'X am - Y pm or post Z pm {zone} time': "
+ "eastern '7 am - 2 pm or post 10 pm eastern time'; central '6 am - 1 pm or post 9 pm central time'; "
+ "mountain '5 am - 12 pm or post 8 pm mountain time'; pacific '4 am - 11 am or post 7 pm pacific time'. "
+ "If location is non-US or unclear, use '7 am - 2 pm or post 10 pm eastern time'. "
  "follow_up: one short friendly nudge in the same voice referencing the earlier message. "
  "email_subject/email_body: a brief email version of the follow-up, signed 'Chirag | AP Guru'. "
  "Also return \"country_dial\": the international dial code digits for the lead's country inferred from Location AND School Name (a school name often pins the city/state - use it). For the window, the school/city determines the US timezone; be precise."
@@ -282,13 +289,15 @@ def build():
     apath = os.path.join(here, "leads_ai.json")
     try: acache = json.load(open(apath))
     except Exception: acache = {}
+    acache = {k: v for k, v in acache.items() if v.get("v") == 3}   # template v3 only
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     new = 0
     for L in leads:
         if L["status"] in ("replied", "waiting"): continue
         if L["id"] in acache or not api_key or new >= MAX_NEW_AI: continue
         try:
-            acache[L["id"]] = draft(api_key, L); new += 1
+            d = draft(api_key, L); d["v"] = 3
+            acache[L["id"]] = d; new += 1
         except Exception as e:
             print(f"leads ai: skipped one ({type(e).__name__})", flush=True)
         time.sleep(0.3)
@@ -316,14 +325,17 @@ def build():
                     f'&body={quote(d.get("email_body",""))}">Email &#9993;</a>')
         wa = (f'<button class=send data-wa="{L["phone"]}">Open in WhatsApp &#8599;</button>'
               if L["phone"] else '<span class=meta>no phone parsed</span>')
+        details = ""
+        if L["loc"]:    details += f'<div class=frow><b>Location:</b> {esc(L["loc"])}</div>'
+        if L["school"]: details += f'<div class=frow><b>School:</b> {esc(L["school"])}</div>'
+        if L["msg"]:    details += f'<div class=frow><b>Message:</b> &ldquo;{esc(L["msg"][:400])}&rdquo;</div>'
         return (f'<div class=item data-key="{esc(L["id"])}-{mode}">'
                 f'<div class=itop><span class=badge style="color:{badge[1]};border-color:{badge[1]}">{badge[0]}</span>'
                 f'<span class=gname>{esc(L["first"])} {esc(L["last"])}</span>'
                 f'{f"<span class=pill>{esc(prog)}</span>" if prog else ""}'
-                f'<span class=meta>{sub}</span>'
                 f'<span class=meta>submitted {eng.when(L["submitted"])} IST</span>'
                 f'<button class=skip title="Hide this lead on this device">done</button></div>'
-                f'<div class=msg>&ldquo;{esc((L["msg"] or "")[:220])}&rdquo;</div>'
+                f'{details}'
                 f'<textarea class=draft rows=4>{esc(txt)}</textarea>'
                 f'<div class=actions>{mail}{wa}</div></div>')
 
@@ -354,6 +366,7 @@ h2{{font-size:14px;background:#f5f7fb;border-left:3px solid #16243f;padding:8px 
 .pill{{font-size:11px;background:#eef2ff;color:#5b21b6;border-radius:20px;padding:2px 9px;font-weight:600}}
 .skip{{margin-left:auto;font-size:11px;color:#067647;background:#ecfdf3;border:1px solid #bfe8d2;border-radius:20px;padding:3px 11px;cursor:pointer}}
 .msg{{font-size:13px;color:#374151;font-style:italic;margin:4px 0}}
+.frow{{font-size:12.5px;color:#374151;margin:2px 0}} .frow b{{color:#6b7280;font-weight:600}}
 .draft{{width:100%;margin-top:8px;font:13.5px/1.5 inherit;padding:9px 11px;border:1px solid #d7dbe3;border-radius:10px;resize:vertical}}
 .actions{{margin-top:8px;display:flex;gap:8px;justify-content:flex-end}}
 .send{{font-size:13px;font-weight:600;color:#fff;background:#128c4b;border:none;border-radius:22px;padding:8px 18px;cursor:pointer}}
