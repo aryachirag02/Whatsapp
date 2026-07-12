@@ -46,16 +46,19 @@ def build_threads(recs):
     return th
 
 def partner_of(msgs):
-    """Best display name + phone digits for the other person in a 1:1."""
+    """Best display name + phone digits for the other person in a 1:1.
+    WhatsApp privacy IDs (LIDs, 14+ digits) are NOT phones and never dialable."""
     name, phone = "", None
     for m in msgs:
         if not m.get("is_self"):
             nm = (m.get("sender_name") or m.get("push_name") or "").strip()
-            if nm and not nm.isdigit(): name = nm
+            if nm and len(re.sub(r"\D", "", nm)) < 14 and not nm.isdigit():
+                name = nm
             ph = re.sub(r"\D", "", m.get("sender") or "")
             if 10 <= len(ph) <= 13: phone = ph
-    if not name and phone: name = eng.fmt_phone(phone)
-    return (name or "Unknown"), phone
+    if not name:
+        name = eng.fmt_phone(phone) if phone else "Unknown contact"
+    return name, phone
 
 def style_examples(threads, limit=8):
     """Recent (their message -> my reply) pairs across all chats, short ones."""
@@ -171,12 +174,13 @@ def build():
         draft = esc(v.get("draft", ""))
         wa_attr = f' data-wa="{phone}"' if phone else ""
         btn = ('<button class=send' + wa_attr + '>Open in WhatsApp &#8599;</button>' if phone
-               else '<span class=meta>no phone number found — open WhatsApp manually</span>')
+               else '<span class=meta>privacy number — reply from the WhatsApp app, then tap replied &#10003;</span>')
         rows += (f'<div class=item data-key="{esc(key)}">'
                  f'<div class=itop><span class=badge style="color:{badge[1]};border-color:{badge[1]}">{badge[0]}</span>'
                  f'<span class=gname>{esc(partner)}</span>'
                  f'<span class=meta>last msg {eng.when(last["ts"])} IST</span>'
-                 f'<button class=skip title="Hide until they message again">skip</button></div>'
+                 f'<button class=mrep title="I already replied elsewhere — hide until they message again">replied &#10003;</button>'
+            f'<button class=skip title="Hide until they message again">skip</button></div>'
                  f'{recent}'
                  f'<textarea class=draft rows=3 placeholder="(no draft — write your reply)">{draft}</textarea>'
                  f'<div class=actions>{btn}</div></div>')
@@ -199,7 +203,8 @@ h1{{font-size:20px;margin:0 0 2px}} .sub{{color:#6b7280;font-size:12.5px;margin-
 .itop{{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px}}
 .badge{{font-size:10.5px;font-weight:700;text-transform:uppercase;border:1px solid;border-radius:20px;padding:2px 9px}}
 .gname{{font-weight:600;font-size:15px}} .meta{{font-size:11px;color:#98a2b3}}
-.skip{{margin-left:auto;font-size:11px;color:#6b7280;background:#f3f4f6;border:1px solid #e7e9ee;border-radius:20px;padding:3px 11px;cursor:pointer}}
+.mrep{{margin-left:auto;font-size:11px;color:#067647;background:#ecfdf3;border:1px solid #bfe8d2;border-radius:20px;padding:3px 11px;cursor:pointer}}
+.skip{{font-size:11px;color:#6b7280;background:#f3f4f6;border:1px solid #e7e9ee;border-radius:20px;padding:3px 11px;cursor:pointer}}
 .dmsg{{font-size:13px;margin:4px 0;padding:7px 11px;border-radius:10px;max-width:92%}}
 .dmsg.them{{background:#f4f5f7}} .dmsg.me{{background:#e7f8ef;margin-left:auto}}
 .draft{{width:100%;margin-top:9px;font:13.5px/1.5 inherit;padding:9px 11px;border:1px solid #d7dbe3;border-radius:10px;resize:vertical}}
@@ -233,7 +238,7 @@ if(hidden){{
   note.appendChild(a);
 }}
 document.addEventListener('click',function(e){{
-  var sk=e.target.closest('.skip');
+  var sk=e.target.closest('.skip')||e.target.closest('.mrep');
   if(sk){{var it=sk.closest('.item');dism[it.dataset.key]=Date.now();save(dism);it.style.display='none';return;}}
   var b=e.target.closest('.send');
   if(b){{
