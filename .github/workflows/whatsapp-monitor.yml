@@ -42,6 +42,10 @@ jobs:
             group_list_cache.json
             ai_summaries.json
             attendee_maps.json
+            dms_latest.json
+            inbox_ai.json
+            webflow_leads.json
+            leads_ai.json
           key: wa-state-${{ github.run_id }}
           restore-keys: |
             wa-state-
@@ -64,6 +68,7 @@ jobs:
               "-J7zk8yNT5WV5L1ZjZJ40w": "myp",
               "KUgjojLpQnKSJmRxddvgvg": "else"
             },
+            "dm_account": "8FuaZkyiTp6o0mNJiSfKsw",
             "lookback_days": 7,
             "exclude_keywords": ["coordination","content","grading","internal","team","staff","accounts","tracking","tech issues","payglocal","non sat"]
           }
@@ -93,6 +98,17 @@ jobs:
       - name: Build owner worry list
         run: python ceo_report.py
 
+      - name: Build reply inbox (owner DMs; drafts in owner's voice, cached)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python inbox_report.py
+
+      - name: Build leads dashboard (Webflow x WhatsApp cross-check)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          WEBFLOW_TOKEN: ${{ secrets.WEBFLOW_TOKEN }}
+        run: python leads_report.py
+
       - name: Save state for next run
         if: always()
         uses: actions/cache/save@v4
@@ -104,6 +120,10 @@ jobs:
             group_list_cache.json
             ai_summaries.json
             attendee_maps.json
+            dms_latest.json
+            inbox_ai.json
+            webflow_leads.json
+            leads_ai.json
           key: wa-state-${{ github.run_id }}
 
       # Master at "/", each team at its own clean path (/sat, /ap, ...).
@@ -118,6 +138,9 @@ jobs:
           cp dashboard_myp.html    _site/myp.html
           cp dashboard_else.html   _site/else.html
           cp dashboard_ceo.html    _site/ceo.html
+          cp dashboard_inbox.html  _site/inbox.html
+          cp dashboard_leads.html  _site/leads.html
+          cp chirag_shell.html     _site/chirag.html
           cp _worker.js            _site/_worker.js
           cp logo.png              _site/logo.png 2>/dev/null || true
 
