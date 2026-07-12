@@ -14,7 +14,7 @@ const TEAM_PATH = {
   all: "/", sat: "/sat", ap: "/ap",
   ib: "/ib", igcse: "/igcse", myp: "/myp", else: "/else",
 };
-const OWNER_PATHS = new Set(["/", "/sat", "/ap", "/ib", "/igcse", "/myp", "/else", "/ceo"]);
+const OWNER_PATHS = new Set(["/", "/sat", "/ap", "/ib", "/igcse", "/myp", "/else", "/ceo", "/inbox", "/leads"]);
 
 function unauthorized() {
   return new Response("Authentication required.", {
@@ -30,7 +30,13 @@ export default {
     {
       const u0 = new URL(request.url);
       if (u0.hostname.startsWith("anita.")) {
-        if (u0.pathname !== "/logo.png") u0.pathname = "/ceo";
+        if (u0.pathname !== "/logo.png" && u0.pathname !== "/inbox") u0.pathname = "/ceo";
+        return env.ASSETS.fetch(new Request(u0.toString(), request));
+      }
+      // chirag.* -> tabbed shell (Inbox + Leads), ungated; iframes load /inbox and /leads
+      if (u0.hostname.startsWith("chirag.")) {
+        const pass = new Set(["/inbox", "/leads", "/ceo", "/logo.png"]);
+        if (!pass.has(u0.pathname)) u0.pathname = "/chirag";
         return env.ASSETS.fetch(new Request(u0.toString(), request));
       }
       if (u0.pathname === "/ceo-a1e14bac51" || u0.pathname === "/ceo-a1e14bac51/") {

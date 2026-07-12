@@ -1,0 +1,34 @@
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>AP Guru — Chirag</title>
+<style>
+*{box-sizing:border-box} html,body{height:100%;margin:0}
+body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#eef1f6;display:flex;flex-direction:column}
+.tabs{display:flex;gap:8px;padding:10px 12px calc(10px + env(safe-area-inset-top,0)) 12px;background:#16243f}
+.tabs{padding-top:calc(10px + env(safe-area-inset-top,0))}
+.tab{flex:1;text-align:center;font-size:14px;font-weight:600;color:#c7cede;background:transparent;
+  border:1px solid rgba(255,255,255,.25);border-radius:22px;padding:9px 0;cursor:pointer}
+.tab.active{background:#fff;color:#16243f;border-color:#fff}
+iframe{flex:1;width:100%;border:0;display:none;background:#eef1f6}
+iframe.active{display:block}
+</style></head><body>
+<div class="tabs">
+  <button class="tab" data-t="inbox">&#128172; Reply inbox</button>
+  <button class="tab" data-t="leads">&#127919; Leads</button>
+</div>
+<iframe data-t="inbox" src="/inbox"></iframe>
+<iframe data-t="leads" src="/leads"></iframe>
+<script>
+function show(t){
+  document.querySelectorAll('.tab,iframe').forEach(function(el){
+    el.classList.toggle('active', el.dataset.t===t);
+  });
+  localStorage.setItem('chirag_tab', t);
+}
+document.querySelectorAll('.tab').forEach(function(b){
+  b.onclick=function(){show(b.dataset.t);};
+});
+show(localStorage.getItem('chirag_tab')||'inbox');
+</script>
+</body></html>

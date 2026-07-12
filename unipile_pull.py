@@ -27,6 +27,8 @@ _accts = cfg.get("accounts")
 if isinstance(_accts, dict):   ACCOUNTS = list(_accts.keys())
 elif isinstance(_accts, list): ACCOUNTS = list(_accts)
 else:                          ACCOUNTS = [cfg["account_id"]]
+DM_ACCOUNT = cfg.get("dm_account")          # owner's personal WhatsApp: 1:1 chats
+DMSP = os.path.join(here, "dms_latest.json")
 LOOKBACK_DAYS = cfg.get("lookback_days", 14)
 STORE_TEXT    = cfg.get("store_text", True)
 INCREMENTAL   = cfg.get("incremental", True)
@@ -83,6 +85,26 @@ def list_group_chats(acct):
         time.sleep(0.12)
     print(f"  chats scanned={total} named groups={named} "
           f"(excluded internal={excl}, stale>{LOOKBACK_DAYS}d={stale}) -> starting list={len(chats)}")
+    return chats
+
+def list_dm_chats(acct):
+    """1:1 chats (type 0) with activity in the window. Returns [(id, name, ts)]."""
+    chats, cursor, total, stale = [], None, 0, 0
+    while True:
+        p = {"account_id": acct, "limit": 100}
+        if cursor: p["cursor"] = cursor
+        data = api_get("chats", p)
+        items = data.get("items", [])
+        total += len(items)
+        for c in items:
+            if c.get("type") != 0: continue
+            ts = parse_ts(c.get("timestamp"))
+            if ts and ts < cutoff: stale += 1; continue
+            chats.append((c["id"], c.get("name") or "", ts))
+        cursor = data.get("cursor")
+        if not cursor: break
+        time.sleep(0.12)
+    print(f"  DM chats scanned={total} (stale>{LOOKBACK_DAYS}d={stale}) -> active={len(chats)}", flush=True)
     return chats
 
 def attendee_map(chat_id, directory=None):
@@ -242,6 +264,36 @@ def main():
               ensure_ascii=False, indent=1)
     directory["self_phones"] = sorted(directory["self_phones"])
     json.dump(directory, open(DIRP, "w"), ensure_ascii=False, indent=1)
+    # ---- owner's personal WhatsApp: 1:1 DMs (separate store; feeds the inbox) ----
+    if DM_ACCOUNT:
+        try: dstore = {ckey(r): r for r in json.load(open(DMSP))}
+        except Exception: dstore = {}
+        dknown = {r["group_id"] for r in dstore.values()}
+        dtodo = []
+        for gid, name, ts in list_dm_chats(DM_ACCOUNT):
+            if gid not in dknown: dtodo.append((gid, name, cutoff))
+            elif (not incr) or (ts is None) or (ts >= overlap): dtodo.append((gid, name, overlap))
+        print(f"  DM fetch: {len(dtodo)} chats", flush=True)
+        for i, (gid, name, gsince) in enumerate(dtodo, 1):
+            try:
+                ent = amcache.get(gid)
+                if ent and (time.time() - ent.get("ts", 0)) < AM_TTL:
+                    amap = ent["amap"]
+                else:
+                    amap = attendee_map(gid, directory)
+                    amcache[gid] = {"amap": amap, "ts": time.time()}
+                for r in pull_messages(gid, name, amap, gsince, DM_ACCOUNT):
+                    r["dm"] = 1
+                    dstore[ckey(r)] = r
+            except Exception as e:
+                print(f"  ! DM {name or gid}: {e}", flush=True)
+            time.sleep(0.05)
+        dcut = now - timedelta(days=LOOKBACK_DAYS)
+        drecs = [r for r in dstore.values() if (parse_ts(r["timestamp"]) or now) >= dcut]
+        drecs.sort(key=lambda r: r["timestamp"])
+        json.dump(drecs, open(DMSP, "w"))
+        print(f"  DM store: {len(drecs)} messages from {len({r['group_id'] for r in drecs})} chats -> dms_latest.json", flush=True)
+
     json.dump(amcache, open(AMP, "w"))
     json.dump({"last_run": now.isoformat()}, open(STATE, "w"), indent=1)
     print(f"Fetched {fetched} new/updated; store now {len(recs)} messages (14d) "

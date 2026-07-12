@@ -1,0 +1,376 @@
+#!/usr/bin/env python3
+"""
+leads_report.py — website leads, cross-checked against the owner's WhatsApp.
+
+Pipeline each run:
+  1. Pull recent form submissions from Webflow (WEBFLOW_TOKEN; site/forms
+     auto-discovered). Merged into webflow_leads.json (cached between runs).
+  2. For each lead, normalize the phone and look it up in the owner's DM store
+     (dms_latest.json):
+        - no chat found            -> NEW: draft the first-touch message
+        - owner messaged, silent
+          for FOLLOWUP_HOURS+      -> FOLLOW-UP DUE: WhatsApp follow-up draft
+                                       + prefilled email (mailto)
+        - lead replied             -> REPLIED (they're in the reply inbox)
+        - owner messaged recently  -> WAITING (no action yet)
+     Indian numbers (+91) are excluded per policy.
+  3. AI (cached per lead) extracts the program, works out the lead's US
+     timezone window, and writes the messages in the owner's template/voice.
+
+Output: dashboard_leads.html. All sending is human: wa.me / mailto prefills.
+"""
+import json, os, re, html, time, urllib.request
+from datetime import datetime, timezone, timedelta
+
+import report_engine as eng
+
+here = os.path.dirname(os.path.abspath(__file__))
+MODEL = "claude-haiku-4-5-20251001"
+MAX_NEW_AI = 25
+FOLLOWUP_HOURS = 48
+LEAD_WINDOW_DAYS = 14
+FROM_EMAIL = "aryachirag@apguru.com"
+
+def esc(x): return html.escape(str(x))
+def _iso(s):
+    try: return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception: return None
+
+# ---------------- Webflow fetch ----------------
+def wf_get(path, token, params=None):
+    url = "https://api.webflow.com/v2/" + path.lstrip("/")
+    if params:
+        from urllib.parse import urlencode
+        url += "?" + urlencode(params)
+    req = urllib.request.Request(url, headers={
+        "Authorization": "Bearer " + token, "accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read())
+
+def fetch_webflow_leads(token):
+    """All submissions across all forms of all sites the token can see."""
+    leads = {}
+    sites = wf_get("sites", token).get("sites", [])
+    for s in sites:
+        try: forms = wf_get(f"sites/{s['id']}/forms", token).get("forms", [])
+        except Exception as e:
+            print(f"leads: forms fetch failed for site {s.get('displayName')}: {e}", flush=True); continue
+        for f in forms:
+            offset = 0
+            while True:
+                try:
+                    data = wf_get(f"forms/{f['id']}/submissions", token,
+                                  {"limit": 100, "offset": offset})
+                except Exception as e:
+                    print(f"leads: submissions fetch failed ({f.get('displayName')}): {e}", flush=True); break
+                subs = data.get("formSubmissions") or data.get("submissions") or []
+                for sub in subs:
+                    resp = sub.get("formResponse") or sub.get("data") or sub.get("response") or {}
+                    leads[sub.get("id")] = {
+                        "id": sub.get("id"),
+                        "form": f.get("displayName") or "",
+                        "submitted": sub.get("dateSubmitted") or sub.get("createdOn") or "",
+                        "fields": resp,
+                    }
+                total = (data.get("pagination") or {}).get("total", 0)
+                offset += 100
+                if offset >= total or not subs: break
+                time.sleep(0.2)
+    return leads
+
+# ---------------- lead parsing ----------------
+def _field(fields, *cands):
+    """Fuzzy field lookup: case/punct-insensitive contains-match."""
+    low = {re.sub(r"[^a-z]", "", k.lower()): v for k, v in fields.items()}
+    for c in cands:
+        cc = re.sub(r"[^a-z]", "", c.lower())
+        for k, v in low.items():
+            if cc in k or k in cc:
+                if v: return str(v).strip()
+    return ""
+
+_DIAL_HINTS=[  # (keywords in location/school, dial code)
+ (("united states","usa"," us","florida","california","texas","new york","jersey","illinois","georgia",
+   "virginia","carolina","washington","massachusetts","pennsylvania","ohio","michigan","arizona",
+   "colorado","seattle","boston","chicago","houston","dallas","austin","atlanta","miami","jacksonville",
+   "san francisco","los angeles","san jose","san diego","denver","phoenix","charlotte","nashville",
+   "minneapolis","portland","connecticut","maryland","tennessee","missouri","indiana","wisconsin"),"1"),
+ (("canada","toronto","vancouver","ontario","calgary","montreal","ottawa"),"1"),
+ (("united kingdom"," uk","london","manchester","birmingham","england","scotland","surrey","kent"),"44"),
+ (("uae","dubai","abu dhabi","sharjah","emirates"),"971"),
+ (("singapore",),"65"), (("hong kong",),"852"), (("qatar","doha"),"974"),
+ (("saudi","riyadh","jeddah","dammam"),"966"), (("kuwait",),"965"), (("bahrain",),"973"),
+ (("oman","muscat"),"968"), (("australia","sydney","melbourne","perth","brisbane"),"61"),
+ (("nigeria","lagos","abuja"),"234"), (("kenya","nairobi"),"254"), (("tanzania","dar es salaam"),"255"),
+ (("switzerland","zurich","geneva"),"41"), (("germany","berlin","munich","frankfurt"),"49"),
+ (("netherlands","amsterdam"),"31"), (("japan","tokyo"),"81"), (("thailand","bangkok"),"66"),
+ (("indonesia","jakarta"),"62"), (("malaysia","kuala lumpur"),"60"),
+ (("india","mumbai","delhi","bangalore","bengaluru","chennai","hyderabad","pune","kolkata","gurgaon","noida","ahmedabad"),"91"),
+]
+def infer_dial(loc, school):
+    t=f"{loc} {school}".lower()
+    for keys,dial in _DIAL_HINTS:
+        if any(k in t for k in keys): return dial
+    return None
+
+def parse_lead(raw):
+    f = raw["fields"]
+    first = _field(f, "first name", "firstname", "name")
+    last  = _field(f, "last name", "lastname")
+    email = _field(f, "email")
+    dial  = re.sub(r"\D", "", _field(f, "dial code", "dialcode", "country code"))
+    phone = re.sub(r"\D", "", _field(f, "phone number", "phone", "mobile", "whatsapp"))
+    loc   = _field(f, "location", "city", "state", "country")
+    school= _field(f, "school name", "school")
+    msg   = _field(f, "field", "message", "requirement", "details", "comments")
+    # phone may already embed the dial code, or appear inside the message
+    if not phone:
+        m = re.search(r"\+?(\d[\d\s\-()]{8,})", msg or "")
+        if m: phone = re.sub(r"\D", "", m.group(1))
+    full = phone
+    if dial and phone and not phone.startswith(dial): full = dial + phone
+    return {"id": raw["id"], "first": first or "there", "last": last, "email": email,
+            "phone": full, "loc": loc, "school": school, "msg": msg,
+            "submitted": _iso(raw.get("submitted") or "")}
+
+# ---------------- DM cross-check ----------------
+def dm_index():
+    """last-10-digits of partner phone -> chat status."""
+    try: recs = json.load(open(os.path.join(here, "dms_latest.json")))
+    except Exception: recs = []
+    chats = {}
+    for r in recs:
+        ts = _iso(r["timestamp"])
+        if not ts: continue
+        chats.setdefault(r["group_id"], []).append((ts, bool(r.get("is_self")),
+                                                    r.get("sender") or ""))
+    idx = {}
+    for cid, msgs in chats.items():
+        msgs.sort()
+        ph = None
+        for _, self_, sender in msgs:
+            if not self_:
+                d = re.sub(r"\D", "", sender)
+                if 10 <= len(d) <= 13: ph = d; break
+        if not ph: continue
+        last_ts, last_self, _ = msgs[-1]
+        first_out = next((t for t, s, _ in msgs if s), None)
+        idx[ph[-10:]] = {"last_ts": last_ts, "last_self": last_self,
+                         "contacted": first_out is not None,
+                         "they_replied_after": any((not s) and first_out and t > first_out
+                                                   for t, s, _ in msgs)}
+    return idx
+
+# ---------------- AI drafting ----------------
+SYSTEM = (
+ "You write WhatsApp outreach for Chirag, founder of AP Guru (online 1-to-1 "
+ "tutoring). Respond ONLY with JSON, no fences: "
+ '{"program":"...","first_touch":"...","follow_up":"...","email_subject":"...","email_body":"..."} '
+ "Rules: program = what they asked about (SAT, ACT, IB, AP, IGCSE, A-Level, GMAT, GRE...). "
+ "first_touch must follow Chirag's template exactly:\n"
+ "Hi {first name},\\n\\nThis is Chirag from AP Guru. This is regarding {program} prep - "
+ "you sent a message on our website.\\n\\nIt would be easier to discuss it over a call. "
+ "Will you be available anytime between {window} this week?\\n"
+ "The window: Chirag's slot is 7 am - 2 pm EASTERN. If the lead's US location implies "
+ "another US timezone, convert that same absolute window to their zone (central 6 am - 1 pm, "
+ "mountain 5 am - 12 pm, pacific 4 am - 11 am) and name the zone. If location is non-US or "
+ "unclear, use '7 am - 2 pm eastern time'. "
+ "follow_up: one short friendly nudge in the same voice referencing the earlier message. "
+ "email_subject/email_body: a brief email version of the follow-up, signed 'Chirag | AP Guru'. "
+ "Also return \"country_dial\": the international dial code digits for the lead's country inferred from Location AND School Name (a school name often pins the city/state - use it). For the window, the school/city determines the US timezone; be precise."
+)
+
+def draft(api_key, lead):
+    body = json.dumps({"model": MODEL, "max_tokens": 500, "system": SYSTEM,
+        "messages": [{"role": "user", "content":
+            f"Lead: {lead['first']} {lead['last']}\nLocation: {lead['loc']}\n"
+            f"School: {lead['school']}\nTheir message: {lead['msg']}\n\nJSON:"}]}).encode()
+    req = urllib.request.Request("https://api.anthropic.com/v1/messages", data=body,
+        headers={"Content-Type": "application/json", "x-api-key": api_key,
+                 "anthropic-version": "2023-06-01"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        data = json.loads(r.read())
+    txt = " ".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+    txt = re.sub(r"^```(json)?|```$", "", txt.strip(), flags=re.M).strip()
+    return json.loads(txt)
+
+# ---------------- main ----------------
+def build():
+    as_of = datetime.now(timezone.utc)
+    token = os.environ.get("WEBFLOW_TOKEN", "").strip()
+
+    lpath = os.path.join(here, "webflow_leads.json")
+    try: store = json.load(open(lpath))
+    except Exception: store = {}
+    fetch_note = ""
+    if token:
+        try:
+            store.update(fetch_webflow_leads(token))
+            print(f"leads: {len(store)} submissions in store", flush=True)
+        except Exception as e:
+            fetch_note = f"Webflow fetch failed: {type(e).__name__}"
+            print("leads: " + fetch_note, flush=True)
+    else:
+        fetch_note = "WEBFLOW_TOKEN not set — showing cached leads only"
+    json.dump(store, open(lpath, "w"))
+
+    cutoff = as_of - timedelta(days=LEAD_WINDOW_DAYS)
+    leads = []
+    skipped_india = 0
+    for raw in store.values():
+        L = parse_lead(raw)
+        if not L["submitted"] or L["submitted"] < cutoff: continue
+        dial = infer_dial(L["loc"], L["school"])
+        # add the country code when the number came in bare (<=10 digits)
+        if L["phone"] and len(L["phone"]) <= 10 and dial:
+            L["phone"] = dial + L["phone"]
+        L["dial_guess"] = dial
+        # India exclusion: explicit +91 numbers, or Indian location with a bare number
+        if (L["phone"].startswith("91") and len(L["phone"]) == 12) or            (dial == "91" and (not L["phone"] or len(L["phone"]) <= 12)):
+            skipped_india += 1; continue
+        leads.append(L)
+    leads.sort(key=lambda x: -x["submitted"].timestamp())
+
+    idx = dm_index()
+    for L in leads:
+        st = idx.get(L["phone"][-10:]) if L["phone"] else None
+        if not st or not st["contacted"]:
+            L["status"] = "new"
+        elif st["they_replied_after"] and not st["last_self"]:
+            L["status"] = "replied"
+        elif st["last_self"] and (as_of - st["last_ts"]) > timedelta(hours=FOLLOWUP_HOURS):
+            L["status"] = "followup"
+        else:
+            L["status"] = "waiting"
+
+    # AI drafts (cached per lead id)
+    apath = os.path.join(here, "leads_ai.json")
+    try: acache = json.load(open(apath))
+    except Exception: acache = {}
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    new = 0
+    for L in leads:
+        if L["status"] in ("replied", "waiting"): continue
+        if L["id"] in acache or not api_key or new >= MAX_NEW_AI: continue
+        try:
+            acache[L["id"]] = draft(api_key, L); new += 1
+        except Exception as e:
+            print(f"leads ai: skipped one ({type(e).__name__})", flush=True)
+        time.sleep(0.3)
+    json.dump(acache, open(apath, "w"))
+    if new: print(f"leads ai: {new} new drafts", flush=True)
+    # AI fallback: bare numbers where the keyword map couldn't infer a dial code
+    for L in leads:
+        if L["phone"] and len(L["phone"]) <= 10 and not L.get("dial_guess"):
+            cd = re.sub(r"\D", "", str((acache.get(L["id"]) or {}).get("country_dial") or ""))
+            if 1 <= len(cd) <= 3:
+                L["phone"] = cd + L["phone"]
+
+    # ---------------- render ----------------
+    def card(L, mode):
+        d = acache.get(L["id"]) or {}
+        prog = d.get("program", "")
+        txt = d.get("first_touch" if mode == "new" else "follow_up", "")
+        sub = f'{esc(L["loc"])}{" · " + esc(L["school"]) if L["school"] else ""}'
+        badge = ("new lead", "#0891b2") if mode == "new" else ("follow-up due", "#b54708")
+        mail = ""
+        if mode == "followup" and L["email"]:
+            from urllib.parse import quote
+            mail = (f'<a class=mailbtn href="mailto:{esc(L["email"])}'
+                    f'?subject={quote(d.get("email_subject","Following up - AP Guru"))}'
+                    f'&body={quote(d.get("email_body",""))}">Email &#9993;</a>')
+        wa = (f'<button class=send data-wa="{L["phone"]}">Open in WhatsApp &#8599;</button>'
+              if L["phone"] else '<span class=meta>no phone parsed</span>')
+        return (f'<div class=item data-key="{esc(L["id"])}-{mode}">'
+                f'<div class=itop><span class=badge style="color:{badge[1]};border-color:{badge[1]}">{badge[0]}</span>'
+                f'<span class=gname>{esc(L["first"])} {esc(L["last"])}</span>'
+                f'{f"<span class=pill>{esc(prog)}</span>" if prog else ""}'
+                f'<span class=meta>{sub}</span>'
+                f'<span class=meta>submitted {eng.when(L["submitted"])} IST</span>'
+                f'<button class=skip title="Hide this lead on this device">done</button></div>'
+                f'<div class=msg>&ldquo;{esc((L["msg"] or "")[:220])}&rdquo;</div>'
+                f'<textarea class=draft rows=4>{esc(txt)}</textarea>'
+                f'<div class=actions>{mail}{wa}</div></div>')
+
+    new_rows = "".join(card(L, "new") for L in leads if L["status"] == "new")
+    fu_rows = "".join(card(L, "followup") for L in leads if L["status"] == "followup")
+    n_wait = sum(1 for L in leads if L["status"] == "waiting")
+    n_rep = sum(1 for L in leads if L["status"] == "replied")
+    if not new_rows: new_rows = '<div class=empty>No uncontacted leads &#10003;</div>'
+    if not fu_rows: fu_rows = '<div class=empty>No follow-ups due &#10003;</div>'
+    note_extra = f' · {esc(fetch_note)}' if fetch_note else ''
+
+    IST = eng.IST
+    H = f"""<!DOCTYPE html><html><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<meta http-equiv=refresh content="300">
+<meta name="robots" content="noindex,nofollow">
+<title>AP Guru — Leads</title>
+<style>
+*{{box-sizing:border-box}} body{{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#15171c;margin:0;background:#eef1f6;line-height:1.5}}
+.brand{{max-width:860px;margin:22px auto 0;padding:0 6px}} .brand img{{height:40px}}
+.sheet{{max-width:860px;margin:14px auto 40px;background:#fff;border:1px solid #e7e9ee;border-radius:18px;padding:26px 28px;box-shadow:0 2px 8px rgba(16,24,40,.06)}}
+h1{{font-size:20px;margin:0 0 2px}} .sub{{color:#6b7280;font-size:12.5px;margin-bottom:14px}}
+h2{{font-size:14px;background:#f5f7fb;border-left:3px solid #16243f;padding:8px 12px;border-radius:8px}}
+.item{{border:1px solid #e7e9ee;border-radius:12px;padding:13px 15px;margin-bottom:12px}}
+.itop{{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:6px}}
+.badge{{font-size:10.5px;font-weight:700;text-transform:uppercase;border:1px solid;border-radius:20px;padding:2px 9px}}
+.gname{{font-weight:600;font-size:15px}} .meta{{font-size:11px;color:#98a2b3}}
+.pill{{font-size:11px;background:#eef2ff;color:#5b21b6;border-radius:20px;padding:2px 9px;font-weight:600}}
+.skip{{margin-left:auto;font-size:11px;color:#067647;background:#ecfdf3;border:1px solid #bfe8d2;border-radius:20px;padding:3px 11px;cursor:pointer}}
+.msg{{font-size:13px;color:#374151;font-style:italic;margin:4px 0}}
+.draft{{width:100%;margin-top:8px;font:13.5px/1.5 inherit;padding:9px 11px;border:1px solid #d7dbe3;border-radius:10px;resize:vertical}}
+.actions{{margin-top:8px;display:flex;gap:8px;justify-content:flex-end}}
+.send{{font-size:13px;font-weight:600;color:#fff;background:#128c4b;border:none;border-radius:22px;padding:8px 18px;cursor:pointer}}
+.mailbtn{{font-size:13px;font-weight:600;color:#16243f;background:#eef2ff;border:1px solid #d7dbe3;border-radius:22px;padding:8px 16px;text-decoration:none}}
+.empty{{color:#067647;padding:12px 4px;font-size:13.5px}}
+.note{{font-size:11.5px;color:#98a2b3;margin-top:16px}}
+@media(max-width:700px){{.sheet{{margin:0;border-radius:0;padding:16px 12px}}}}
+</style></head><body>
+<div class=brand><img src="logo.png" alt="" onerror="this.style.display='none'"></div>
+<div class=sheet>
+<h1>Website leads</h1>
+<div class=sub>last {LEAD_WINDOW_DAYS} days, newest first · {n_wait} awaiting their reply · {n_rep} replied (see <a href="/inbox">inbox</a>) · {skipped_india} Indian numbers excluded · updated {(as_of+IST).strftime('%d %b %Y, %H:%M')} IST{note_extra}</div>
+<h2>New — send first touch</h2>
+{new_rows}
+<h2>Follow-up due (no reply for {FOLLOWUP_HOURS}h+)</h2>
+{fu_rows}
+<div class=note>Edit the draft, then Open in WhatsApp / Email and tap send yourself. "done" hides a card on this device. <a href="/inbox">Reply inbox</a> · <a href="/ceo">Worry list</a></div>
+</div>
+<script>
+var KEY='leads_done';
+function load(){{try{{return JSON.parse(localStorage.getItem(KEY))||{{}};}}catch(e){{return {{}};}}}}
+function save(d){{localStorage.setItem(KEY,JSON.stringify(d));}}
+var dism=load(); var hidden=0;
+document.querySelectorAll('.item').forEach(function(it){{
+  if(dism[it.dataset.key]){{it.style.display='none';hidden++;}}
+}});
+if(hidden){{
+  var note=document.querySelector('.note');
+  var a=document.createElement('a'); a.href='#';
+  a.textContent=' Show '+hidden+' done';
+  a.style.cssText='margin-left:8px;color:#5b21b6;font-weight:600';
+  a.onclick=function(ev){{ev.preventDefault();localStorage.removeItem(KEY);location.reload();}};
+  note.appendChild(a);
+}}
+document.addEventListener('click',function(e){{
+  var sk=e.target.closest('.skip');
+  if(sk){{var it=sk.closest('.item');dism[it.dataset.key]=Date.now();save(dism);it.style.display='none';return;}}
+  var b=e.target.closest('.send');
+  if(b){{
+    var it=b.closest('.item');
+    var txt=it.querySelector('.draft').value;
+    window.open('https://wa.me/+'+b.dataset.wa+'?text='+encodeURIComponent(txt),'_blank');
+  }}
+}});
+(function(){{var cut=Date.now()-60*86400000,ch=false;
+for(var k in dism){{if(dism[k]<cut){{delete dism[k];ch=true;}}}} if(ch) save(dism);}})();
+</script>
+</body></html>"""
+    open(os.path.join(here, "dashboard_leads.html"), "w").write(H)
+    print(f"Leads: {sum(1 for L in leads if L['status']=='new')} new, "
+          f"{sum(1 for L in leads if L['status']=='followup')} follow-ups, "
+          f"{n_wait} waiting, {n_rep} replied")
+
+if __name__ == "__main__":
+    build()
