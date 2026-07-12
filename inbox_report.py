@@ -74,12 +74,15 @@ SYSTEM = (
  "You draft WhatsApp replies for Chirag, who runs AP Guru, an online tutoring "
  "company. You will see his REAL past replies as style examples — match his "
  "tone, brevity, and phrasing exactly. Reply in his voice, first person. "
- "Classify the chat first. Respond ONLY with JSON, no markdown fences: "
- '{"kind":"parent"|"lead"|"personal"|"other","draft":"..."} '
+ "Respond ONLY with JSON, no markdown fences: "
+ '{"kind":"parent"|"lead"|"personal"|"other","needs_reply":true|false,"draft":"..."} '
  "kind=parent for existing students' parents; lead for prospective customers; "
- "personal for friends/family/vendors. For personal/other, draft must be an "
- "empty string. Keep drafts short and natural like the examples. If a call is "
- "the right move, suggest one the way Chirag does."
+ "personal for friends/family/vendors. needs_reply=false when the last message "
+ "is a closer or acknowledgement that ends the conversation (e.g. 'Sounds good', "
+ "'Ok thanks', 'Great', a thumbs-up) — nothing is being asked or expected. "
+ "For personal/other or needs_reply=false, draft must be an empty string. "
+ "Keep drafts short and natural like the examples. If a call is the right move, "
+ "suggest one the way Chirag does."
 )
 
 def call_claude(api_key, examples, convo, partner):
@@ -114,6 +117,10 @@ def build():
         last = real[-1]
         if last.get("is_self"): continue
         if last["ts"] < cutoff: continue
+        _t = re.sub(r"[^a-z ]", "", (last.get("text") or "").lower()).strip()
+        if _t in ("ok","okay","k","thanks","thank you","thanks a lot","great","sounds good",
+                  "sure","noted","done","perfect","cool","got it","alright","fine","yes","no problem",
+                  "ok thanks","okay thanks","thankyou","tq","ty"): continue
         open_chats.append((cid, msgs, last))
     open_chats.sort(key=lambda x: -x[2]["ts"].timestamp())
 
@@ -136,6 +143,7 @@ def build():
             out = call_claude(api_key, examples, convo, partner)
             if isinstance(out, dict) and out.get("kind"):
                 cache[key] = {"kind": out["kind"], "draft": (out.get("draft") or "")[:600],
+                              "needs_reply": bool(out.get("needs_reply", True)),
                               "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
                 new += 1
         except Exception as e:
@@ -152,6 +160,7 @@ def build():
         v = cache.get(key) or {}
         kind = v.get("kind", "")
         if kind in ("personal", "other"): continue
+        if v and v.get("needs_reply") is False: continue   # closers: no reply expected
         partner, phone = partner_of(msgs)
         badge = {"parent": ("parent", "#5b21b6"), "lead": ("lead", "#0891b2")}.get(kind, ("new", "#6b7280"))
         recent = "".join(

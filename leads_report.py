@@ -47,15 +47,39 @@ def wf_get(path, token, params=None):
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.loads(r.read())
 
+def _store_sub(leads, sub, form_name=""):
+    resp = sub.get("formResponse") or sub.get("data") or sub.get("response") or {}
+    leads[sub.get("id")] = {"id": sub.get("id"), "form": form_name or sub.get("displayName") or "",
+                            "submitted": sub.get("dateSubmitted") or sub.get("createdOn") or "",
+                            "fields": resp}
+
 def fetch_webflow_leads(token):
-    """All submissions across all forms of all sites the token can see."""
+    """All submissions across all sites — site-level endpoint first (covers
+    every form in one sweep), per-form endpoint as fallback."""
     leads = {}
     sites = wf_get("sites", token).get("sites", [])
     for s in sites:
+        # preferred: site-wide submissions (avoids per-form 404s)
+        try:
+            offset = 0
+            while True:
+                data = wf_get(f"sites/{s['id']}/form_submissions", token,
+                              {"limit": 100, "offset": offset})
+                subs = data.get("formSubmissions") or data.get("submissions") or []
+                for sub in subs: _store_sub(leads, sub)
+                total = (data.get("pagination") or {}).get("total", 0)
+                offset += 100
+                if offset >= total or not subs: break
+                time.sleep(0.2)
+            print(f"leads: site '{s.get('displayName')}': {len(leads)} submissions collected (site-wide)", flush=True)
+            continue   # site-level worked; skip per-form for this site
+        except Exception as e:
+            print(f"leads: site-wide fetch unavailable for '{s.get('displayName')}' ({type(e).__name__}) — trying per-form", flush=True)
         try: forms = wf_get(f"sites/{s['id']}/forms", token).get("forms", [])
         except Exception as e:
             print(f"leads: forms fetch failed for site {s.get('displayName')}: {e}", flush=True); continue
         for f in forms:
+            got = 0
             offset = 0
             while True:
                 try:
@@ -64,18 +88,13 @@ def fetch_webflow_leads(token):
                 except Exception as e:
                     print(f"leads: submissions fetch failed ({f.get('displayName')}): {e}", flush=True); break
                 subs = data.get("formSubmissions") or data.get("submissions") or []
-                for sub in subs:
-                    resp = sub.get("formResponse") or sub.get("data") or sub.get("response") or {}
-                    leads[sub.get("id")] = {
-                        "id": sub.get("id"),
-                        "form": f.get("displayName") or "",
-                        "submitted": sub.get("dateSubmitted") or sub.get("createdOn") or "",
-                        "fields": resp,
-                    }
+                got += len(subs)
+                for sub in subs: _store_sub(leads, sub, f.get("displayName") or "")
                 total = (data.get("pagination") or {}).get("total", 0)
                 offset += 100
                 if offset >= total or not subs: break
                 time.sleep(0.2)
+            print(f"leads: form '{f.get('displayName')}' ({s.get('displayName')}): {got} submissions", flush=True)
     return leads
 
 # ---------------- lead parsing ----------------
@@ -223,10 +242,11 @@ def build():
 
     cutoff = as_of - timedelta(days=LEAD_WINDOW_DAYS)
     leads = []
-    skipped_india = 0
+    skipped_india = 0; skipped_nodate = 0; skipped_old = 0
     for raw in store.values():
         L = parse_lead(raw)
-        if not L["submitted"] or L["submitted"] < cutoff: continue
+        if not L["submitted"]: skipped_nodate += 1; continue
+        if L["submitted"] < cutoff: skipped_old += 1; continue
         dial = infer_dial(L["loc"], L["school"])
         # add the country code when the number came in bare (<=10 digits)
         if L["phone"] and len(L["phone"]) <= 10 and dial:
@@ -237,6 +257,14 @@ def build():
             skipped_india += 1; continue
         leads.append(L)
     leads.sort(key=lambda x: -x["submitted"].timestamp())
+    print(f"leads: window={len(leads)} | outside {LEAD_WINDOW_DAYS}d={skipped_old} | no-date={skipped_nodate} | india={skipped_india}", flush=True)
+    # dedupe repeat submissions from the same phone (keep newest)
+    _seen=set(); _dd=[]
+    for L in leads:
+        k=L["phone"][-10:] if L["phone"] else L["id"]
+        if k in _seen: continue
+        _seen.add(k); _dd.append(L)
+    leads=_dd
 
     idx = dm_index()
     for L in leads:
