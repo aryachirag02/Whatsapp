@@ -196,8 +196,10 @@ SYSTEM = (
  '{"program":"...","first_touch":"...","follow_up":"...","email_subject":"...","email_body":"..."} '
  "Rules: program = what they asked about (SAT, ACT, IB, AP, IGCSE, A-Level, GMAT, GRE...). "
  "first_touch must follow Chirag's template exactly:\n"
- "Hi {first name},\\n\\nThis is Chirag from AP Guru. This is regarding {program} prep - "
+ "Hi {first name},\\n\\nThis is Chirag from AP Guru. This is regarding {program} prep{for_whom} - "
  "you sent a message on our website.\\n\\nIt would be easier to discuss it over a call. "
+ "{for_whom}: if their message says who it's for (my daughter/son/child), add "
+ "' for your daughter' / ' for your son' / ' for your child'; otherwise omit entirely. "
  "Will you be available anytime between {window} this week?\\n"
  "The window: Chirag's slots are 7 am - 2 pm OR post 10 pm, EASTERN. To pick the zone: "
  "FIRST identify the US state from the location and school (e.g. 'Central Jersey College Prep' "
@@ -285,6 +287,11 @@ def build():
                 if not base.get(fld) and L.get(fld): base[fld]=L[fld]
     leads=[_by[k] for k in _order]
 
+    try: MANUAL=set(json.load(open(os.path.join(here,"lead_flags.json"))).keys())
+    except Exception: MANUAL=set()
+    n_manual=sum(1 for L in leads if L["id"] in MANUAL)
+    leads=[L for L in leads if L["id"] not in MANUAL]
+
     idx = dm_index()
     for L in leads:
         st = idx.get(L["phone"][-10:]) if L["phone"] else None
@@ -301,14 +308,14 @@ def build():
     apath = os.path.join(here, "leads_ai.json")
     try: acache = json.load(open(apath))
     except Exception: acache = {}
-    acache = {k: v for k, v in acache.items() if v.get("v") == 3}   # template v3 only
+    acache = {k: v for k, v in acache.items() if v.get("v") == 4}   # template v4 only
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     new = 0
     for L in leads:
         if L["status"] in ("replied", "waiting"): continue
         if L["id"] in acache or not api_key or new >= MAX_NEW_AI: continue
         try:
-            d = draft(api_key, L); d["v"] = 3
+            d = draft(api_key, L); d["v"] = 4
             acache[L["id"]] = d; new += 1
         except Exception as e:
             print(f"leads ai: skipped one ({type(e).__name__})", flush=True)
@@ -346,6 +353,8 @@ def build():
                 f'<span class=gname>{esc(L["first"])} {esc(L["last"])}</span>'
                 f'{f"<span class=pill>{esc(prog)}</span>" if prog else ""}'
                 f'<span class=meta>submitted {eng.when(L["submitted"])} IST</span>'
+                f'<button class=already data-lid="{esc(L["id"])}" data-name="{esc(L["first"])} {esc(L["last"])}" '
+                f'title="I contacted this lead another way — remove permanently">already messaged</button>'
                 f'<button class=skip title="Hide this lead on this device">done</button></div>'
                 f'{details}'
                 f'<textarea class=draft rows=4>{esc(txt)}</textarea>'
@@ -376,7 +385,8 @@ h2{{font-size:14px;background:#f5f7fb;border-left:3px solid #16243f;padding:8px 
 .badge{{font-size:10.5px;font-weight:700;text-transform:uppercase;border:1px solid;border-radius:20px;padding:2px 9px}}
 .gname{{font-weight:600;font-size:15px}} .meta{{font-size:11px;color:#98a2b3}}
 .pill{{font-size:11px;background:#eef2ff;color:#5b21b6;border-radius:20px;padding:2px 9px;font-weight:600}}
-.skip{{margin-left:auto;font-size:11px;color:#067647;background:#ecfdf3;border:1px solid #bfe8d2;border-radius:20px;padding:3px 11px;cursor:pointer}}
+.already{{margin-left:auto;font-size:11px;color:#0891b2;background:#ecfeff;border:1px solid #a5f3fc;border-radius:20px;padding:3px 11px;cursor:pointer}}
+.skip{{font-size:11px;color:#067647;background:#ecfdf3;border:1px solid #bfe8d2;border-radius:20px;padding:3px 11px;cursor:pointer}}
 .msg{{font-size:13px;color:#374151;font-style:italic;margin:4px 0}}
 .frow{{font-size:12.5px;color:#374151;margin:2px 0}} .frow b{{color:#6b7280;font-weight:600}}
 .draft{{width:100%;margin-top:8px;font:13.5px/1.5 inherit;padding:9px 11px;border:1px solid #d7dbe3;border-radius:10px;resize:vertical}}
@@ -390,7 +400,7 @@ h2{{font-size:14px;background:#f5f7fb;border-left:3px solid #16243f;padding:8px 
 <div class=brand><img src="logo.png" alt="" onerror="this.style.display='none'"></div>
 <div class=sheet>
 <h1>Website leads</h1>
-<div class=sub>last {LEAD_WINDOW_DAYS} days, newest first · {n_wait} awaiting their reply · {n_rep} replied (see <a href="/inbox">inbox</a>) · {skipped_india} Indian numbers excluded · updated {(as_of+IST).strftime('%d %b %Y, %H:%M')} IST{note_extra}</div>
+<div class=sub>last {LEAD_WINDOW_DAYS} days, newest first · {n_wait} awaiting their reply · {n_rep} replied (see <a href="/inbox">inbox</a>) · {skipped_india} Indian numbers excluded · {n_manual} marked already messaged · updated {(as_of+IST).strftime('%d %b %Y, %H:%M')} IST{note_extra}</div>
 <h2>New — send first touch</h2>
 {new_rows}
 <h2>Follow-up due (no reply for {FOLLOWUP_HOURS}h+)</h2>
@@ -413,7 +423,23 @@ if(hidden){{
   a.onclick=function(ev){{ev.preventDefault();localStorage.removeItem(KEY);location.reload();}};
   note.appendChild(a);
 }}
-document.addEventListener('click',function(e){{
+document.addEventListener('click',async function(e){{
+  var am=e.target.closest('.already');
+  if(am){{
+    var it=am.closest('.item');
+    am.disabled=true; am.textContent='saving…';
+    try{{
+      var r=await fetch('/api/leadflag',{{method:'POST',headers:{{'Content-Type':'application/json'}},
+        body:JSON.stringify({{lead_id:am.dataset.lid,name:am.dataset.name}})}});
+      if(!r.ok) throw 0;
+      dism[it.dataset.key]=Date.now(); save(dism);
+      it.style.display='none';
+    }}catch(err){{
+      am.disabled=false; am.textContent='already messaged';
+      alert('Could not save — check the FLAGS KV binding.');
+    }}
+    return;
+  }}
   var sk=e.target.closest('.skip');
   if(sk){{var it=sk.closest('.item');dism[it.dataset.key]=Date.now();save(dism);it.style.display='none';return;}}
   var b=e.target.closest('.send');

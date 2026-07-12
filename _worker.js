@@ -35,6 +35,26 @@ export default {
       }
       // chirag.* -> tabbed shell (Inbox + Leads), ungated; iframes load /inbox and /leads
       if (u0.hostname.startsWith("chirag.")) {
+        if (u0.pathname === "/api/leadflag" && request.method === "POST" && env.FLAGS) {
+          let d = {};
+          try { d = await request.json(); } catch {}
+          if (d.lead_id) {
+            await env.FLAGS.put("lead:" + d.lead_id, JSON.stringify({
+              name: (d.name || "").slice(0, 120), by: "chirag-host", ts: new Date().toISOString(),
+            }));
+            return new Response('{"ok":true}', { headers: { "Content-Type": "application/json" } });
+          }
+          return new Response('{"error":"lead_id required"}', { status: 400, headers: { "Content-Type": "application/json" } });
+        }
+        if (u0.pathname === "/api/leadflags" && env.FLAGS) {
+          const out = {};
+          const list = await env.FLAGS.list({ prefix: "lead:" });
+          for (const k of list.keys) {
+            const v = await env.FLAGS.get(k.name);
+            if (v) out[k.name.slice(5)] = JSON.parse(v);
+          }
+          return new Response(JSON.stringify(out), { headers: { "Content-Type": "application/json" } });
+        }
         const pass = new Set(["/inbox", "/leads", "/ceo", "/logo.png"]);
         if (!pass.has(u0.pathname)) u0.pathname = "/chirag";
         return env.ASSETS.fetch(new Request(u0.toString(), request));
@@ -75,6 +95,30 @@ export default {
             by: email, ts: new Date().toISOString(),
           }));
           return new Response(JSON.stringify({ ok: true }),
+            { headers: { "Content-Type": "application/json" } });
+        }
+        if (url0.pathname === "/api/leadflag" && request.method === "POST") {
+          if (!env.FLAGS) return new Response(JSON.stringify({ error: "KV binding FLAGS not configured" }),
+            { status: 503, headers: { "Content-Type": "application/json" } });
+          let d = {};
+          try { d = await request.json(); } catch {}
+          if (!d.lead_id) return new Response(JSON.stringify({ error: "lead_id required" }),
+            { status: 400, headers: { "Content-Type": "application/json" } });
+          await env.FLAGS.put("lead:" + d.lead_id, JSON.stringify({
+            name: (d.name || "").slice(0, 120), by: email, ts: new Date().toISOString(),
+          }));
+          return new Response(JSON.stringify({ ok: true }),
+            { headers: { "Content-Type": "application/json" } });
+        }
+        if (url0.pathname === "/api/leadflags" && request.method === "GET") {
+          if (!env.FLAGS) return new Response("{}", { headers: { "Content-Type": "application/json" } });
+          const out = {};
+          const list = await env.FLAGS.list({ prefix: "lead:" });
+          for (const k of list.keys) {
+            const v = await env.FLAGS.get(k.name);
+            if (v) out[k.name.slice(5)] = JSON.parse(v);
+          }
+          return new Response(JSON.stringify(out, null, 1),
             { headers: { "Content-Type": "application/json" } });
         }
         if (url0.pathname === "/api/flags" && request.method === "GET") {
