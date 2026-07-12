@@ -99,14 +99,20 @@ def fetch_webflow_leads(token):
 
 # ---------------- lead parsing ----------------
 def _field(fields, *cands):
-    """Fuzzy field lookup: case/punct-insensitive contains-match."""
+    """Field lookup: exact (normalized) key first, then fuzzy contains —
+    preferring the longest value so e.g. a 'Program field' dropdown never
+    shadows the real 'field' message box."""
     low = {re.sub(r"[^a-z]", "", k.lower()): v for k, v in fields.items()}
-    for c in cands:
+    for c in cands:                      # pass 1: exact
+        cc = re.sub(r"[^a-z]", "", c.lower())
+        if low.get(cc): return str(low[cc]).strip()
+    best = ""
+    for c in cands:                      # pass 2: fuzzy, longest value wins
         cc = re.sub(r"[^a-z]", "", c.lower())
         for k, v in low.items():
-            if cc in k or k in cc:
-                if v: return str(v).strip()
-    return ""
+            if (cc in k or k in cc) and v and len(str(v)) > len(best):
+                best = str(v).strip()
+    return best
 
 _DIAL_HINTS=[  # (keywords in location/school, dial code)
  (("united states","usa"," us","florida","california","texas","new york","jersey","illinois","georgia",
@@ -265,13 +271,19 @@ def build():
         leads.append(L)
     leads.sort(key=lambda x: -x["submitted"].timestamp())
     print(f"leads: window={len(leads)} | outside {LEAD_WINDOW_DAYS}d={skipped_old} | no-date={skipped_nodate} | india={skipped_india}", flush=True)
-    # dedupe repeat submissions from the same phone (keep newest)
-    _seen=set(); _dd=[]
-    for L in leads:
+    # dedupe repeat submissions from the same phone: keep newest card, but
+    # merge in the richer message/school/location from older submissions
+    _by={} ; _order=[]
+    for L in leads:                      # leads are newest-first
         k=L["phone"][-10:] if L["phone"] else L["id"]
-        if k in _seen: continue
-        _seen.add(k); _dd.append(L)
-    leads=_dd
+        if k not in _by:
+            _by[k]=L; _order.append(k)
+        else:
+            base=_by[k]
+            if len(L.get("msg") or "") > len(base.get("msg") or ""): base["msg"]=L["msg"]
+            for fld in ("school","loc","email","first","last"):
+                if not base.get(fld) and L.get(fld): base[fld]=L[fld]
+    leads=[_by[k] for k in _order]
 
     idx = dm_index()
     for L in leads:
