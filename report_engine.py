@@ -24,6 +24,7 @@ from datetime import datetime, timezone, timedelta
 # ---------- CONFIG KNOBS ----------
 STAFF_MIN_GROUPS = 3
 COLD_HOURS       = 12
+STALE_HOURS      = 72   # open threads older than this drop off the dashboards
 IST              = timedelta(hours=5, minutes=30)
 REFRESH_SECONDS  = 300
 MEDIA_MARKERS    = ("cannot display this type of message",)
@@ -350,6 +351,8 @@ def analyze(recs, as_of, keep_gids=None):
                     if start_concern: staff_concern[e["sid"]]+=1
                     bursts+=1; waiting=False; start_concern=False
         open_mins=(as_of-start).total_seconds()/60 if waiting else None
+        if waiting and last_inbound and (as_of-last_inbound["ts"]).total_seconds()>STALE_HOURS*3600:
+            waiting=False; open_mins=None   # stale (>72h) — age out of the dashboards
         if waiting:
             met_open=open_mins<=sla_hours_for(start)*60
             last_text=(last_inbound["text"] if last_inbound else "")
@@ -384,9 +387,7 @@ def analyze(recs, as_of, keep_gids=None):
     # only threads that actually look like they need a reply (question/request/attachment/concerning)
     need_order={"concerning":0,"question":1,"request":2,"attachment":3}
     attention=[a for a in awaiting if a["needs_reply"]]
-    attention.sort(key=lambda x:(not x["concerning"],
-                                 need_order.get(x["need_type"],9),
-                                 not x["breached"], -x["waiting_min"]))
+    attention.sort(key=lambda x:-x["last_ts"].timestamp())   # newest first
     attach_open=[a for a in awaiting if not a["needs_reply"] and a["need_type"]=="attachment"]
     attach_open.sort(key=lambda x:-x["waiting_min"])
     fyi_open=[a for a in awaiting if not a["needs_reply"] and a["need_type"]!="attachment"]
@@ -420,7 +421,8 @@ def analyze(recs, as_of, keep_gids=None):
         at_risk.append({"gid":gid,"group":group_name[gid],"n":info["n"],"latest":info["latest"],
                         "team_reply":treply,
                         "ts":info["latest_ts"],"open":gid in awaiting_gids})
-    at_risk.sort(key=lambda x:(-x["n"],-x["ts"].timestamp()))
+    at_risk=[r for r in at_risk if r["ts"] and (as_of-r["ts"]).total_seconds()<=STALE_HOURS*3600]
+    at_risk.sort(key=lambda x:-x["ts"].timestamp())   # newest first
 
     # group watchlist (worst groups by a problem score)
     awaiting_by_gid={a["gid"]:a for a in awaiting}
@@ -703,7 +705,7 @@ def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,atta
                    "open":(cr["open"] if cr else (wl["status"] in ("open","breached","cold") if wl else False)),
                    "score":((wl["score"] if wl else 0)+(cr["n"]*2 if cr else 0))}
     risk_rows=""
-    for m in sorted(merged.values(),key=lambda x:-x["score"])[:20]:
+    for m in sorted(merged.values(),key=lambda x:(-(x.get("latest_ts").timestamp() if x.get("latest_ts") else 0),-x["score"]))[:20]:
         st=(f'<span class=pill style="background:#fef3f2;color:{BAD}">awaiting reply</span>' if m["open"]
             else f'<span class=pill style="background:#ecfdf3;color:{OK}">replied</span>')
         lat=esc((m["latest"] or "")[:130]) or f'<span style="color:{MUT}">— no flagged wording; listed for slow-service pattern (median reply &gt;2h)</span>'
@@ -822,7 +824,7 @@ def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,atta
     l_breach=_mini([f'<b>{esc(a["group"])}</b> · {esc(a["need_type"])} · waiting {fmt(a["waiting_min"])}{_ai_txt(a.get("ctx_key"))}'
                     for a in sorted([x for x in _all_open if x["breached"]],key=lambda x:-x["waiting_min"])])
     l_risk=_mini([f'<b>{esc(m["group"])}</b> · {esc((m["latest"] or "")[:110]) or "slow-service pattern"}{_ai_txt(ai_key_by_group.get(m["group"]))}'
-                  for m in sorted(merged.values(),key=lambda x:-x["score"])[:40]])
+                  for m in sorted(merged.values(),key=lambda x:(-(x.get("latest_ts").timestamp() if x.get("latest_ts") else 0),-x["score"]))[:40]])
     _wk=as_of-timedelta(days=7)
     l_conc=_mini([f'<b>{esc(m["group"])}</b> · {esc(m["text"][:120])}' for m in concerning_msgs if m["ts"]>=_wk])
     tile_lists=(f'<div class=tlist id=tl-needs>{l_needs}</div>'
@@ -935,7 +937,7 @@ table.hm td.hd{{border:none;padding:0 7px 0 0;color:{MUT};font-size:10.5px;white
 {tile_lists}
 </div></details>
 
-<details class=panel open><summary>Act now — needs your reply <span class=cap>{s["needs_attention"]} threads · breached first, then breaching soon</span></summary><div class=panelbody>
+<details class=panel open><summary>Act now — needs your reply <span class=cap>{s["needs_attention"]} threads · newest first · last 72h</span></summary><div class=panelbody>
 <div class=sec>Only open threads whose last parent message needs a response. "Usually handled by" = team member who replies most in that group.</div>
 <table><thead><tr><th>Student group</th><th>Last message from parent</th><th>Usually handled by</th><th>Waiting</th><th style="text-align:right">SLA</th></tr></thead><tbody>{at_rows}</tbody></table>
 <details><summary>Attachments awaiting acknowledgement — {len(attach_open)} (homework, screenshots, docs)</summary>
@@ -947,7 +949,7 @@ table.hm td.hd{{border:none;padding:0 7px 0 0;color:{MUT};font-size:10.5px;white
 </details>
 </div></details>
 
-<details class=panel open><summary>Accounts at risk <span class=cap>churn wording + problem groups, worst first</span></summary><div class=panelbody>
+<details class=panel open><summary>Accounts at risk <span class=cap>churn wording + problem groups · newest first · last 72h</span></summary><div class=panelbody>
 <div class=sec>Groups with refund/stop/complaint wording, or a slow-service pattern (median reply &gt;2h). Call these.</div>
 <table><thead><tr><th>Student group</th><th style="text-align:center">Churn flags</th><th style="text-align:center">Concerns</th><th>Latest concern</th><th>Median reply</th><th style="text-align:right">Status</th></tr></thead><tbody>{risk_rows}</tbody></table>
 

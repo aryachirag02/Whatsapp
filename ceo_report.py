@@ -14,7 +14,7 @@ reappears automatically).
 Runs after report_engine.py in the same workflow; reuses its analysis.
 """
 import json, os, html
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import report_engine as eng   # reuse config, classification, analyze()
 
@@ -76,8 +76,12 @@ def build():
                 f"{w['concern']} concerns this week", WARN, w["group"], "",
                 None, status=w.get("status"))
 
+    # only the last 72 hours, newest first; older worries age out automatically
+    cutoff = as_of - timedelta(hours=72)
+    fresh = [it for it in items.values() if it["ts"] and it["ts"] > cutoff]
+    fresh.sort(key=lambda x: -x["ts"].timestamp())
     seen_names=set(); worry=[]
-    for it in sorted(items.values(), key=lambda x: -x["sev"]):
+    for it in fresh:
         if it["group"] in seen_names: continue
         seen_names.add(it["group"]); worry.append(it)
         if len(worry)>=15: break
@@ -134,7 +138,7 @@ h1{{font-size:20px;margin:0 0 2px}} .sub{{color:#6b7280;font-size:12.5px;margin-
 <div class=brand><img src="logo.png" alt="" onerror="this.style.display='none'"></div>
 <div class=sheet>
 <h1>Owner's worry list</h1>
-<div class=sub>Top {len(worry)} accounts needing your attention · updated {(as_of+IST).strftime('%d %b %Y, %H:%M')} IST · auto-refreshes every 5 min</div>
+<div class=sub>{len(worry)} accounts from the last 72 hours, newest first · updated {(as_of+IST).strftime('%d %b %Y, %H:%M')} IST · auto-refreshes every 5 min</div>
 {rows}
 <div class=note>"handled &#10003;" hides an account on this device until a NEW worrying message arrives in that group. Full dashboards: <a href="/">master view</a>.</div>
 </div>
