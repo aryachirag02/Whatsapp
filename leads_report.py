@@ -19,7 +19,7 @@ Pipeline each run:
 
 Output: dashboard_leads.html. All sending is human: wa.me / mailto prefills.
 """
-import json, os, re, html, time, urllib.request
+import json, os, re, html, time, urllib.request, urllib.error
 from datetime import datetime, timezone, timedelta
 
 import report_engine as eng
@@ -207,6 +207,13 @@ def build():
         try:
             store.update(fetch_webflow_leads(token))
             print(f"leads: {len(store)} submissions in store", flush=True)
+        except urllib.error.HTTPError as e:
+            hint = {401: "token invalid — re-check the WEBFLOW_TOKEN secret",
+                    403: "token missing a scope — needs Sites: Read AND Forms: Read",
+                    404: "endpoint not found — token may be for the wrong workspace"}.get(e.code, "")
+            fetch_note = f"Webflow fetch failed: HTTP {e.code}" + (f" ({hint})" if hint else "")
+            try: print("leads: " + fetch_note + " | body: " + e.read()[:200].decode("utf-8","ignore"), flush=True)
+            except Exception: print("leads: " + fetch_note, flush=True)
         except Exception as e:
             fetch_note = f"Webflow fetch failed: {type(e).__name__}"
             print("leads: " + fetch_note, flush=True)
