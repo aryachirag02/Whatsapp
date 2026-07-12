@@ -84,6 +84,10 @@ jobs:
           # If the response isn't valid JSON (e.g. old worker served HTML), fall back to no flags.
           python -c "import json;json.load(open('flagged_groups.json'))" 2>/dev/null || echo '{}' > flagged_groups.json
           python -c "import json;print(len(json.load(open('flagged_groups.json'))),'flagged groups excluded')"
+          curl -fsS -u "$DASH_USER:$DASH_PASS" https://apguru-whatsapp.pages.dev/api/leadflags \
+            -o lead_flags.json || echo '{}' > lead_flags.json
+          python -c "import json;json.load(open('lead_flags.json'))" 2>/dev/null || echo '{}' > lead_flags.json
+          python -c "import json;print(len(json.load(open('lead_flags.json'))),'leads marked already-messaged')"
 
       - name: Pull messages (READ-ONLY)
         env:
