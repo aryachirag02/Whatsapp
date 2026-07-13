@@ -147,6 +147,8 @@ jobs:
           cp chirag_shell.html     _site/chirag.html
           cp _worker.js            _site/_worker.js
           cp logo.png              _site/logo.png 2>/dev/null || true
+          cp -r marketing          _site/marketing 2>/dev/null || true
+          cp sig-logo.png          _site/sig-logo.png 2>/dev/null || true
 
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@v3
