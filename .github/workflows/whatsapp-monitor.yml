@@ -46,6 +46,7 @@ jobs:
             inbox_ai.json
             webflow_leads.json
             leads_ai.json
+            wa_check.json
           key: wa-state-${{ github.run_id }}
           restore-keys: |
             wa-state-
@@ -111,6 +112,7 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           WEBFLOW_TOKEN: ${{ secrets.WEBFLOW_TOKEN }}
+          UNIPILE_API_KEY: ${{ secrets.UNIPILE_API_KEY }}
         run: python leads_report.py
 
       - name: Save state for next run
@@ -128,6 +130,7 @@ jobs:
             inbox_ai.json
             webflow_leads.json
             leads_ai.json
+            wa_check.json
           key: wa-state-${{ github.run_id }}
 
       # Master at "/", each team at its own clean path (/sat, /ap, ...).
