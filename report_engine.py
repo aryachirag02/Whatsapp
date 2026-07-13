@@ -329,7 +329,7 @@ def analyze(recs, as_of, keep_gids=None):
                         if t!="urgent": cat_counts[t]+=1
                     if e["concerning"]:
                         cat_counts["concerning"]+=1; conc_period[half(e["ts"])]+=1
-                        rec={"group":group_name[gid],"who":best_name(e["sid"]) or fmt_phone(e["sid"]),
+                        rec={"group":group_name[gid],"gid":gid,"who":best_name(e["sid"]) or fmt_phone(e["sid"]),
                              "ts":e["ts"],"tags":sorted(t for t in e["tags"] if t!="urgent") or ["urgent"],
                              "text":e["text"][:300],"churn":e["churn"]}
                         concerning_msgs.append(rec); last_concern=rec
@@ -671,7 +671,8 @@ def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,atta
         ow=esc(a["owner"]) if a.get("owner") else "—"
         nrb=f'<div><button class=nr data-gid="{esc(a["gid"])}" data-group="{esc(a["group"])}">not relevant?</button></div>'
         sent=f'<div class=when>sent {when(a.get("last_ts"))} IST</div>' if a.get("last_ts") else ""
-        at_rows+=(f'<tr><td>{esc(a["group"])}{ai_line(a.get("ctx_key",""))}{nrb}</td><td>{ttag}<div class=snip>{msg}</div>{sent}</td>'
+        cpy=f'<button class=cpy data-g="{esc(a["group"])}" title="Copy the group name — paste into WhatsApp search to open it">&#128203; copy name</button>'
+        at_rows+=(f'<tr><td>{esc(a["group"])} {cpy}{ai_line(a.get("ctx_key",""))}{nrb}</td><td>{ttag}<div class=snip>{msg}</div>{sent}</td>'
                   f'<td style="white-space:nowrap;color:{MUT}">{ow}</td>'
                   f'<td style="white-space:nowrap">{fmt(a["waiting_min"])}</td>'
                   f'<td style="text-align:right">{sla_pill(a)}</td></tr>')
@@ -679,7 +680,8 @@ def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,atta
 
     fyi_rows=""
     for a in fyi_open:
-        fyi_rows+=(f'<tr><td>{esc(a["group"])}</td><td><div class=snip>{esc((a["last_text"] or "")[:150])}</div>'
+        _nr=f'<div><button class=nr data-gid="{esc(a["gid"])}" data-group="{esc(a["group"])}">not relevant?</button></div>'
+        fyi_rows+=(f'<tr><td>{esc(a["group"])}{_nr}</td><td><div class=snip>{esc((a["last_text"] or "")[:150])}</div>'
                    f'<div class=when>sent {when(a.get("last_ts"))} IST</div></td>'
                    f'<td style="white-space:nowrap">{fmt(a["waiting_min"])}</td></tr>')
     if not fyi_rows: fyi_rows=f'<tr><td colspan=3 style="color:{MUT};padding:10px">None</td></tr>'
@@ -719,7 +721,8 @@ def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,atta
                      f'{(" <span class=when>· " + when(tr["ts"]) + " IST</span>") if tr.get("ts") else ""}</div>') if tr else ""
         nrb=(f'<div><button class=nr data-gid="{esc(m["gid"])}" data-group="{esc(m["group"])}">not relevant?</button></div>'
              if m.get("gid") else "")
-        risk_rows+=(f'<tr><td>{esc(m["group"])}{ai_line(aik) if aik else ""}{nrb}</td>'
+        cpy=f'<button class=cpy data-g="{esc(m["group"])}" title="Copy the group name — paste into WhatsApp search to open it">&#128203;</button>'
+        risk_rows+=(f'<tr><td>{esc(m["group"])} {cpy}{ai_line(aik) if aik else ""}{nrb}</td>'
                     f'<td style="text-align:center">{m["churn"] or "—"}</td>'
                     f'<td style="text-align:center">{m["concern"] or "—"}</td>'
                     f'<td>{lat}{treply_html}</td>'
@@ -728,12 +731,17 @@ def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,atta
     if not risk_rows: risk_rows=f'<tr><td colspan=6 style="color:{OK};padding:14px">No at-risk accounts ✓</td></tr>'
 
     # ---- concerning messages (collapsible) ----
+    def _nrb(gid,name):
+        return (f' <button class=nr data-gid="{esc(gid)}" data-group="{esc(name)}">not relevant?</button>'
+                if gid else "")
     cm_rows=""
     for m in concerning_msgs:
         tags=" ".join(f'<span class=tg>{esc(t)}</span>' for t in m["tags"])
         risk=' <span class=pill style="background:#fef3f2;color:%s">churn</span>'%BAD if m["churn"] else ""
         cm_rows+=(f'<tr><td style="white-space:nowrap">{(m["ts"]+IST).strftime("%d %b %H:%M")}</td>'
-                  f'<td>{esc(m["group"])}</td><td>{esc(m["who"])}</td><td>{tags}{risk}</td>'
+                  f'<td>{esc(m["group"])}'
+                  f'{_nrb(m.get("gid"), m["group"])}'
+                  f'</td><td>{esc(m["who"])}</td><td>{tags}{risk}</td>'
                   f'<td>{esc(m["text"][:200])}</td></tr>')
     if not cm_rows: cm_rows=f'<tr><td colspan=5 style="color:{OK};padding:14px">No concerning messages ✓</td></tr>'
 
@@ -819,14 +827,14 @@ def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,atta
     def _mini(rows):
         if not rows: return f'<div style="color:{MUT};padding:8px">None</div>'
         return "".join(f'<div class=mrow>{r}</div>' for r in rows[:40])
-    l_needs=_mini([f'<b>{esc(a["group"])}</b> · waiting {fmt(a["waiting_min"])}{_ai_txt(a.get("ctx_key"))}' for a in attention])
+    l_needs=_mini([f'<b>{esc(a["group"])}</b>{_nrb(a.get("gid"),a["group"])} · waiting {fmt(a["waiting_min"])}{_ai_txt(a.get("ctx_key"))}' for a in attention])
     _all_open=attention+fyi_open+attach_open
-    l_breach=_mini([f'<b>{esc(a["group"])}</b> · {esc(a["need_type"])} · waiting {fmt(a["waiting_min"])}{_ai_txt(a.get("ctx_key"))}'
+    l_breach=_mini([f'<b>{esc(a["group"])}</b>{_nrb(a.get("gid"),a["group"])} · {esc(a["need_type"])} · waiting {fmt(a["waiting_min"])}{_ai_txt(a.get("ctx_key"))}'
                     for a in sorted([x for x in _all_open if x["breached"]],key=lambda x:-x["waiting_min"])])
-    l_risk=_mini([f'<b>{esc(m["group"])}</b> · {esc((m["latest"] or "")[:110]) or "slow-service pattern"}{_ai_txt(ai_key_by_group.get(m["group"]))}'
+    l_risk=_mini([f'<b>{esc(m["group"])}</b>{_nrb(m.get("gid"),m["group"])} · {esc((m["latest"] or "")[:110]) or "slow-service pattern"}{_ai_txt(ai_key_by_group.get(m["group"]))}'
                   for m in sorted(merged.values(),key=lambda x:(-(x.get("latest_ts").timestamp() if x.get("latest_ts") else 0),-x["score"]))[:40]])
     _wk=as_of-timedelta(days=7)
-    l_conc=_mini([f'<b>{esc(m["group"])}</b> · {esc(m["text"][:120])}' for m in concerning_msgs if m["ts"]>=_wk])
+    l_conc=_mini([f'<b>{esc(m["group"])}</b>{_nrb(m.get("gid"),m["group"])} · {esc(m["text"][:120])}' for m in concerning_msgs if m["ts"]>=_wk])
     tile_lists=(f'<div class=tlist id=tl-needs>{l_needs}</div>'
                 f'<div class=tlist id=tl-breach>{l_breach}</div>'
                 f'<div class=tlist id=tl-risk>{l_risk}</div>'
@@ -882,6 +890,8 @@ details.panel>summary::after{{content:"▸";color:{MUT};font-weight:400;transiti
 details.panel[open]>summary::after{{transform:rotate(90deg)}}
 details.panel>summary .cap{{font-weight:400;color:{MUT};font-size:12px;margin-left:8px}}
 .panelbody{{padding:14px 15px 4px}}
+.cpy{{font-size:10px;color:#6b7280;background:#f8f9fb;border:1px solid #e7e9ee;border-radius:14px;padding:1px 7px;cursor:pointer;vertical-align:middle}}
+.cpy:hover{{background:#eef1f6}}
 .nr{{font-size:10.5px;color:{MUT};background:#f3f4f6;border:1px solid {LINE};border-radius:20px;padding:1px 8px;margin-top:5px;cursor:pointer}}
 .nr:hover{{background:#e9eaee}}
 .tlist{{display:none;margin-top:12px;border-top:1px solid {LINE};padding-top:10px}}
@@ -1003,6 +1013,14 @@ fetch('/api/flags').then(function(r){{return r.ok?r.json():{{}};}}).then(functio
   }}
 }}).catch(function(){{}});
 document.addEventListener('click',async function(e){{
+  var c=e.target.closest('.cpy');
+  if(c){{
+    try{{await navigator.clipboard.writeText(c.dataset.g);
+      var t=c.textContent; c.textContent='copied \u2713';
+      setTimeout(function(){{c.textContent=t;}},1400);
+    }}catch(err){{ prompt('Copy the group name:', c.dataset.g); }}
+    return;
+  }}
   var b=e.target.closest('.nr');
   if(b){{
     var reason=prompt("Why is this not relevant? (sent to Chirag to improve the system)");
