@@ -594,7 +594,7 @@ def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,atta
     def card(lbl,val,col=INK,sub="",target=""):
         sb=f'<div class=csub>{sub}</div>' if sub else ""
         t=f' data-t="{target}" style="cursor:pointer"' if target else ""
-        hint='<div class=csub style="color:#98a2b3">click to see groups</div>' if target else ""
+        hint='<div class=csub style="color:#b6bcc8">&#9662; tap for detail</div>' if target else ""
         return f'<div class=c{t}><div class=lbl>{lbl}</div><div class=val style="color:{col}">{val}</div>{sb}{hint}</div>'
 
     # ---- trend helpers (arrows shown ON the glance tiles) ----
@@ -609,8 +609,10 @@ def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,atta
         col=OK if good else BAD; arr="▲" if diff>=0 else "▼"
         return f'<span style="color:{col}"> {arr} {abs(diff)} pts vs prev 7d</span>'
     def delta_n(cur,prev,higher_good=False):
-        diff=cur-prev; good=(diff>=0)==higher_good
-        col=OK if good else BAD; arr="▲" if diff>=0 else ("▬" if diff==0 else "▼")
+        diff=cur-prev
+        if diff==0: return ""
+        good=(diff>=0)==higher_good
+        col=OK if good else BAD; arr="▲" if diff>0 else "▼"
         return f'<span style="color:{col}"> {arr} {abs(diff)} vs prev 7d</span>'
 
     breached=[a for a in attention if a["breached"]]
@@ -669,18 +671,21 @@ def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,atta
         ttag=f'<span class=tg style="background:#f3f4f6;color:{tcol}">{esc(typ)}</span>'
         msg=esc((a["last_text"] or "")[:150]) or "<span style='color:%s'>(attachment / media)</span>"%MUT
         ow=esc(a["owner"]) if a.get("owner") else "—"
-        nrb=f'<div><button class=nr data-gid="{esc(a["gid"])}" data-group="{esc(a["group"])}">not relevant?</button></div>'
+        nrb=f' <button class=nr data-gid="{esc(a["gid"])}" data-group="{esc(a["group"])}">not relevant?</button>'
         sent=f'<div class=when>sent {when(a.get("last_ts"))} IST</div>' if a.get("last_ts") else ""
         cpy=f'<button class=cpy data-g="{esc(a["group"])}" title="Copy the group name — paste into WhatsApp search to open it">&#128203; copy name</button>'
-        at_rows+=(f'<tr><td>{esc(a["group"])} {cpy}{ai_line(a.get("ctx_key",""))}{nrb}</td><td>{ttag}<div class=snip>{msg}</div>{sent}</td>'
-                  f'<td style="white-space:nowrap;color:{MUT}">{ow}</td>'
-                  f'<td style="white-space:nowrap">{fmt(a["waiting_min"])}</td>'
-                  f'<td style="text-align:right">{sla_pill(a)}</td></tr>')
-    if not at_rows: at_rows=f'<tr><td colspan=5 style="color:{OK};padding:14px">Nothing needs a reply ✓</td></tr>'
+        owner_html=f'<span class=meta>usually {ow}</span>' if a.get("owner") else ""
+        at_rows+=(f'<div class=acard>'
+                  f'<div class=ctop>{ttag}<span class=cname>{esc(a["group"])}</span>{cpy}{nrb}'
+                  f'<span class=cright>{owner_html}<span class=cwait>waiting {fmt(a["waiting_min"])}</span>{sla_pill(a)}</span></div>'
+                  f'<div class=cmsg>&ldquo;{msg}&rdquo; <span class=when>{("sent " + when(a["last_ts"]) + " IST") if a.get("last_ts") else ""}</span></div>'
+                  f'{ai_line(a.get("ctx_key",""))}'
+                  f'</div>')
+    if not at_rows: at_rows=f'<div style="color:{OK};padding:14px">Nothing needs a reply ✓</div>'
 
     fyi_rows=""
     for a in fyi_open:
-        _nr=f'<div><button class=nr data-gid="{esc(a["gid"])}" data-group="{esc(a["group"])}">not relevant?</button></div>'
+        _nr=f' <button class=nr data-gid="{esc(a["gid"])}" data-group="{esc(a["group"])}">not relevant?</button>'
         fyi_rows+=(f'<tr><td>{esc(a["group"])}{_nr}</td><td><div class=snip>{esc((a["last_text"] or "")[:150])}</div>'
                    f'<div class=when>sent {when(a.get("last_ts"))} IST</div></td>'
                    f'<td style="white-space:nowrap">{fmt(a["waiting_min"])}</td></tr>')
@@ -706,7 +711,7 @@ def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,atta
                    "median":(wl["median_min"] if wl else None),
                    "open":(cr["open"] if cr else (wl["status"] in ("open","breached","cold") if wl else False)),
                    "score":((wl["score"] if wl else 0)+(cr["n"]*2 if cr else 0))}
-    risk_rows=""
+    risk_rows=""; slow_rows=""
     for m in sorted(merged.values(),key=lambda x:(-(x.get("latest_ts").timestamp() if x.get("latest_ts") else 0),-x["score"]))[:20]:
         st=(f'<span class=pill style="background:#fef3f2;color:{BAD}">awaiting reply</span>' if m["open"]
             else f'<span class=pill style="background:#ecfdf3;color:{OK}">replied</span>')
@@ -719,16 +724,24 @@ def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,atta
                      f'{(esc(tr["who"]) + ": ") if tr and tr.get("who") else ""}'
                      f'{esc(tr["text"])}'
                      f'{(" <span class=when>· " + when(tr["ts"]) + " IST</span>") if tr.get("ts") else ""}</div>') if tr else ""
-        nrb=(f'<div><button class=nr data-gid="{esc(m["gid"])}" data-group="{esc(m["group"])}">not relevant?</button></div>'
+        nrb=(f' <button class=nr data-gid="{esc(m["gid"])}" data-group="{esc(m["group"])}">not relevant?</button>'
              if m.get("gid") else "")
         cpy=f'<button class=cpy data-g="{esc(m["group"])}" title="Copy the group name — paste into WhatsApp search to open it">&#128203;</button>'
-        risk_rows+=(f'<tr><td>{esc(m["group"])} {cpy}{ai_line(aik) if aik else ""}{nrb}</td>'
-                    f'<td style="text-align:center">{m["churn"] or "—"}</td>'
-                    f'<td style="text-align:center">{m["concern"] or "—"}</td>'
-                    f'<td>{lat}{treply_html}</td>'
-                    f'<td style="white-space:nowrap">{fmt(m["median"])}</td>'
-                    f'<td style="text-align:right">{st}</td></tr>')
-    if not risk_rows: risk_rows=f'<tr><td colspan=6 style="color:{OK};padding:14px">No at-risk accounts ✓</td></tr>'
+        if (m["churn"] or 0) > 0 or (m["concern"] or 0) > 0:
+            risk_rows+=(f'<div class=acard>'
+                        f'<div class=ctop><span class=tg style="background:#fef3f2;color:{BAD}">flagged</span>'
+                        f'<span class=cname>{esc(m["group"])}</span>{cpy}{nrb}'
+                        f'<span class=cright><span class=meta>median {fmt(m["median"])}</span>{st}</span></div>'
+                        f'<div class=cmsg>{lat}</div>{treply_html}'
+                        f'{ai_line(aik) if aik else ""}'
+                        f'</div>')
+        else:
+            slow_rows+=(f'<div class=mrow><b>{esc(m["group"])}</b> {cpy}{nrb}'
+                        f' · median reply {fmt(m["median"])} · {st}</div>')
+    if not risk_rows: risk_rows=f'<div style="color:{OK};padding:14px">No flagged accounts — nothing worrying in the last 72h ✓</div>'
+    n_slow=slow_rows.count("mrow")
+    slow_watch=(f'<details><summary>Slow-service watch — {n_slow} groups with median reply &gt;2h · already replied, just slow</summary>{slow_rows}</details>'
+                if slow_rows else "")
 
     # ---- concerning messages (collapsible) ----
     def _nrb(gid,name):
@@ -882,6 +895,15 @@ def _write_html(s,sender_groups,team,best_name,fmt_phone,attention,fyi_open,atta
 h1{{font-size:21px;margin:0 0 2px}} .sub{{color:{MUT};font-size:12.5px}}
 h2{{background:#f5f7fb;border-left:3px solid {NAVY};padding:8px 12px;border-radius:8px}}
 tbody tr:nth-child(even) td{{background:#fafbfd}}
+.cardslist{{display:flex;flex-direction:column;gap:10px;margin:8px 0}}
+.acard{{border:1px solid {LINE};border-radius:12px;padding:11px 14px;background:#fff}}
+.ctop{{display:flex;align-items:center;gap:8px;flex-wrap:wrap}}
+.cname{{font-weight:600;font-size:14.5px}}
+.cright{{margin-left:auto;display:flex;align-items:center;gap:10px;white-space:nowrap}}
+.cwait{{font-size:12px;font-weight:600}}
+.cmsg{{font-size:13px;color:#374151;margin-top:6px;font-style:italic}}
+.cmsg .when{{font-style:normal}}
+
 details.panel{{border:1px solid {LINE};border-radius:12px;margin:12px 0;background:#fff;overflow:hidden}}
 details.panel>summary{{list-style:none;cursor:pointer;padding:12px 15px;font-size:15px;font-weight:600;
   background:#f5f7fb;border-left:3px solid {NAVY};display:flex;align-items:center;justify-content:space-between}}
@@ -948,8 +970,8 @@ table.hm td.hd{{border:none;padding:0 7px 0 0;color:{MUT};font-size:10.5px;white
 </div></details>
 
 <details class=panel open><summary>Act now — needs your reply <span class=cap>{s["needs_attention"]} threads · newest first · last 72h</span></summary><div class=panelbody>
-<div class=sec>Only open threads whose last parent message needs a response. "Usually handled by" = team member who replies most in that group.</div>
-<table><thead><tr><th>Student group</th><th>Last message from parent</th><th>Usually handled by</th><th>Waiting</th><th style="text-align:right">SLA</th></tr></thead><tbody>{at_rows}</tbody></table>
+<div class=sec>Only open threads whose last parent message needs a response. "usually X" = the team member who replies most in that group.</div>
+<div class=cardslist>{at_rows}</div>
 <details><summary>Attachments awaiting acknowledgement — {len(attach_open)} (homework, screenshots, docs)</summary>
 <div class=sec>Last parent message is a file/media with no question. Worth a quick 👍 or "received", but not urgent.</div>
 <table><thead><tr><th>Student group</th><th>Waiting</th></tr></thead><tbody>{"".join(f'<tr><td>{esc(a["group"])}</td><td style="white-space:nowrap">{fmt(a["waiting_min"])}</td></tr>' for a in attach_open) or f'<tr><td colspan=2 style="color:{MUT};padding:10px">None</td></tr>'}</tbody></table>
@@ -960,8 +982,9 @@ table.hm td.hd{{border:none;padding:0 7px 0 0;color:{MUT};font-size:10.5px;white
 </div></details>
 
 <details class=panel open><summary>Accounts at risk <span class=cap>churn wording + problem groups · newest first · last 72h</span></summary><div class=panelbody>
-<div class=sec>Groups with refund/stop/complaint wording, or a slow-service pattern (median reply &gt;2h). Call these.</div>
-<table><thead><tr><th>Student group</th><th style="text-align:center">Churn flags</th><th style="text-align:center">Concerns</th><th>Latest concern</th><th>Median reply</th><th style="text-align:right">Status</th></tr></thead><tbody>{risk_rows}</tbody></table>
+<div class=sec>Groups where a parent used refund/stop/complaint wording. Call these. Slow-reply groups sit in the watch list below.</div>
+<div class=cardslist>{risk_rows}</div>
+{slow_watch}
 
 <details><summary>All concerning messages — {len(concerning_msgs)} in last {LOOKBACK_DAYS} days</summary>
 <table><thead><tr><th>When</th><th>Group</th><th>From</th><th>Type</th><th>Message</th></tr></thead><tbody>{cm_rows}</tbody></table>

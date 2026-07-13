@@ -187,6 +187,35 @@ def parse_lead(raw):
             "submitted": _iso(raw.get("submitted") or "")}
 
 # ---------------- DM cross-check ----------------
+_WA_CACHE_P = os.path.join(here, "wa_check.json")
+def wa_checker():
+    """check(phone)->True/False/None(unknown). Cached forever per number."""
+    try: cache = json.load(open(_WA_CACHE_P))
+    except Exception: cache = {}
+    key = os.environ.get("UNIPILE_API_KEY", "").strip()
+    try: cfg = json.load(open(os.path.join(here, "config.json")))
+    except Exception: cfg = {}
+    acct = cfg.get("dm_account"); dsn = cfg.get("dsn", "https://api55.unipile.com:18582")
+    calls = {"n": 0}
+    def check(phone):
+        if not phone: return None
+        if phone in cache: return cache[phone]
+        if not (key and acct) or calls["n"] >= 30: return None
+        calls["n"] += 1
+        try:
+            req = urllib.request.Request(f"{dsn}/api/v1/users/{phone}?account_id={acct}",
+                headers={"X-API-KEY": key, "accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                ok = (r.status == 200)
+        except urllib.error.HTTPError as e:
+            ok = False if e.code == 404 else None
+        except Exception:
+            ok = None
+        if ok is not None: cache[phone] = ok
+        return ok
+    def save(): json.dump(cache, open(_WA_CACHE_P, "w"))
+    return check, save
+
 def dm_index():
     """last-10-digits of partner phone -> chat status."""
     try: recs = json.load(open(os.path.join(here, "dms_latest.json")))
@@ -339,6 +368,13 @@ def build():
         else:
             L["status"] = "waiting"
 
+    # WhatsApp presence for actionable leads (cached; capped per run)
+    wa_check, wa_save = wa_checker()
+    for L in leads:
+        if L["status"] in ("new", "followup") and L["phone"]:
+            L["wa"] = wa_check(L["phone"])
+    wa_save()
+
     # AI drafts (cached per lead id)
     apath = os.path.join(here, "leads_ai.json")
     try: acache = json.load(open(apath))
@@ -389,11 +425,14 @@ def build():
             mail = (f'<button class=sendmail data-to="{esc(L["email"])}" '
                     f'data-name="{esc(L["first"])} {esc(L["last"])}" data-sub="{esc(msub)}" '
                     f'data-files="{esc(json.dumps(_files))}" '
-                    f'data-mode="{mode}">Send email &#9993;{(" (+" + str(len(_files)) + " files)") if _files else ""}</button>'
-                    f'<a class=mailfall href="mailto:{esc(L["email"])}'
-                    f'?subject={quote(msub)}&body={quote(mbody)}" title="Open in your mail app instead">mail app</a>')
-        wa = (f'<button class=send data-wa="{L["phone"]}">Open in WhatsApp &#8599;</button>'
-              if L["phone"] else '<span class=meta>no phone parsed</span>')
+                    f'data-mode="{mode}">Send email &#9993;{(" (+" + str(len(_files)) + " files)") if _files else ""}</button>')
+        if L["phone"] and L.get("wa") is False:
+            wa = '<span class=meta>not on WhatsApp — email them</span>'
+        elif L["phone"]:
+            wa = f'<button class=send data-wa="{L["phone"]}">Open in WhatsApp &#8599;</button>'
+        else:
+            wa = '<span class=meta>no phone parsed</span>'
+
         details = ""
         if L["loc"]:    details += f'<div class=frow><b>Location:</b> {esc(L["loc"])}</div>'
         if L["school"]: details += f'<div class=frow><b>School:</b> {esc(L["school"])}</div>'
@@ -407,8 +446,7 @@ def build():
                 f'<button class=already data-lid="{esc(L["id"])}" data-name="{esc(L["first"])} {esc(L["last"])}" '
                 f'data-kind="{"no_followup" if mode == "followup" else "already_messaged"}" '
                 f'title="Remove permanently — the system records why">'
-                f'{"no follow-up" if mode == "followup" else "already messaged"}</button>'
-                f'<button class=skip title="Hide this lead on this device">done</button></div>'
+                f'{"no follow-up" if mode == "followup" else "already messaged"}</button></div>'
                 f'{details}'
                 f'<textarea class=draft rows=4 data-ebody="{esc(d.get("email_body","") if mode=="followup" else "")}">{esc(txt)}</textarea>'
                 f'<div class=actions>{mail}{wa}</div></div>')
@@ -439,7 +477,8 @@ h2{{font-size:14px;background:#f5f7fb;border-left:3px solid #16243f;padding:8px 
 .gname{{font-weight:600;font-size:15px}} .meta{{font-size:11px;color:#98a2b3}}
 .pill{{font-size:11px;background:#eef2ff;color:#5b21b6;border-radius:20px;padding:2px 9px;font-weight:600}}
 .hist{{font-size:11px;background:#fff7e6;color:#b54708;border:1px solid #fde3b8;border-radius:20px;padding:2px 9px;font-weight:600;white-space:nowrap}}
-.already{{margin-left:auto;font-size:11px;color:#0891b2;background:#ecfeff;border:1px solid #a5f3fc;border-radius:20px;padding:3px 11px;cursor:pointer}}
+.already{{margin-left:auto;font-size:11px;color:#98a2b3;background:none;border:none;text-decoration:underline;cursor:pointer;padding:2px 4px}}
+.already:hover{{color:#0891b2}}
 .skip{{font-size:11px;color:#067647;background:#ecfdf3;border:1px solid #bfe8d2;border-radius:20px;padding:3px 11px;cursor:pointer}}
 .msg{{font-size:13px;color:#374151;font-style:italic;margin:4px 0}}
 .frow{{font-size:12.5px;color:#374151;margin:2px 0}} .frow b{{color:#6b7280;font-weight:600}}
@@ -448,7 +487,6 @@ h2{{font-size:14px;background:#f5f7fb;border-left:3px solid #16243f;padding:8px 
 .send{{font-size:13px;font-weight:600;color:#fff;background:#128c4b;border:none;border-radius:22px;padding:8px 18px;cursor:pointer}}
 .sendmail{{font-size:13px;font-weight:600;color:#fff;background:#16243f;border:none;border-radius:22px;padding:8px 16px;cursor:pointer}}
 .sendmail:disabled{{background:#94a3b8}}
-.mailfall{{font-size:11px;color:#98a2b3;align-self:center;text-decoration:underline;margin-right:2px}}
 .mailbtn{{font-size:13px;font-weight:600;color:#16243f;background:#eef2ff;border:1px solid #d7dbe3;border-radius:22px;padding:8px 16px;text-decoration:none}}
 .empty{{color:#067647;padding:12px 4px;font-size:13.5px}}
 .note{{font-size:11.5px;color:#98a2b3;margin-top:16px}}
@@ -511,6 +549,7 @@ document.addEventListener('click',async function(e){{
       }}
       if(!r.ok) throw new Error(await r.text());
       sm.textContent='emailed \u2713';
+      dism[sm.closest('.item').dataset.key]=Date.now(); save(dism);
     }}catch(err){{
       sm.disabled=false; sm.textContent='Send email \u2709';
       alert('Send failed: '+(err.message||err).slice(0,300));
@@ -540,6 +579,7 @@ document.addEventListener('click',async function(e){{
     var it=b.closest('.item');
     var txt=it.querySelector('.draft').value;
     window.open('https://wa.me/+'+b.dataset.wa+'?text='+encodeURIComponent(txt),'_blank');
+    dism[it.dataset.key]=Date.now(); save(dism);   // acted -> gone on next reload
   }}
 }});
 (function(){{var cut=Date.now()-60*86400000,ch=false;
