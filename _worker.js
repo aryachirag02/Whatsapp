@@ -10,6 +10,71 @@
 // NOTE: paths are extensionless ("/sat", not "/sat.html") because Pages
 // auto-redirects "*.html" to the pretty URL, which would loop.
 
+// ---- email sending (owner only): Unipile -> Chirag's Gmail ----
+const UNIPILE_DSN = "https://api55.unipile.com:18582";
+const GMAIL_ACCOUNT_ID = "aN0iYRJjTEq3hEjtMPH-Yw";
+const INSTAGRAM_URL = "https://www.instagram.com/apguru";  // TODO(Chirag): confirm handle
+const SIGNATURE_HTML = '<br><br>' +
+ '<table cellpadding="0" cellspacing="0" style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#222">' +
+ '<tr><td style="padding-right:16px;vertical-align:top">' +
+ '<img src="https://chirag.apguru.com/sig-logo.png" alt="AP Guru" width="90" style="display:block"></td>' +
+ '<td style="border-left:2px solid #333;padding-left:16px;line-height:1.6">' +
+ '<b>AP Guru</b><br>' +
+ 'SAT | ACT | IB | AP | A-levels | IGCSE | GMAT<br>' +
+ '+91 9920200350<br>' +
+ '<a href="https://www.apguru.com" style="color:#222">www.apguru.com</a><br>' +
+ 'Connect with us on <a href="' + INSTAGRAM_URL + '" style="color:#c13584">Instagram</a>' +
+ '</td></tr></table>';
+function escapeHtml(t) {
+  return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+// attachments come per-request from the leads page (repo /marketing folder only)
+const ATTACH_RE = /^marketing\/[\w\-. ()']+\.(pdf|png|jpe?g)$/;
+
+async function sendLeadEmail(request, env, origin) {
+  if (!env.UNIPILE_API_KEY)
+    return new Response('{"error":"UNIPILE_API_KEY not configured in Cloudflare Pages secrets"}',
+      { status: 503, headers: { "Content-Type": "application/json" } });
+  let d = {};
+  try { d = await request.json(); } catch {}
+  if (!d.to || !d.subject || !d.body)
+    return new Response('{"error":"to, subject, body required"}',
+      { status: 400, headers: { "Content-Type": "application/json" } });
+  const fd = new FormData();
+  fd.append("account_id", GMAIL_ACCOUNT_ID);
+  fd.append("subject", String(d.subject).slice(0, 300));
+  const bodyHtml = escapeHtml(String(d.body).slice(0, 8000)).replace(/\n/g, "<br>") + SIGNATURE_HTML;
+  fd.append("body", bodyHtml);
+  fd.append("to", JSON.stringify([{ display_name: String(d.name || "").slice(0, 100),
+                                    identifier: String(d.to).slice(0, 200) }]));
+  const files = Array.isArray(d.files) ? d.files.slice(0, 5) : [];
+  for (const f of files) {
+    if (!ATTACH_RE.test(f)) continue;
+    try {
+      const url = origin + "/" + f.split("/").map(encodeURIComponent).join("/");
+      const res = await env.ASSETS.fetch(new Request(url));
+      if (res.ok) fd.append("attachments", await res.blob(), f.split("/").pop());
+    } catch {}
+  }
+  const r = await fetch(UNIPILE_DSN + "/api/v1/emails",
+    { method: "POST", headers: { "X-API-KEY": env.UNIPILE_API_KEY }, body: fd });
+  const txt = await r.text();
+  return new Response(txt, { status: r.status, headers: { "Content-Type": "application/json" } });
+}
+
+function checkOwnerBasic(request, env) {
+  let users; try { users = JSON.parse(env.USERS || "{}"); } catch { return false; }
+  const hdr = request.headers.get("Authorization") || "";
+  const [sch, enc] = hdr.split(" ");
+  if (sch !== "Basic" || !enc) return false;
+  try {
+    const dec = atob(enc); const i = dec.indexOf(":");
+    const em = dec.slice(0, i).trim().toLowerCase(); const pw = dec.slice(i + 1);
+    const u = users[em];
+    return !!(u && pw === u.pass && (u.team || "") === "all");
+  } catch { return false; }
+}
+
 const TEAM_PATH = {
   all: "/", sat: "/sat", ap: "/ap",
   ib: "/ib", igcse: "/igcse", myp: "/myp", else: "/else",
@@ -35,12 +100,19 @@ export default {
       }
       // chirag.* -> tabbed shell (Inbox + Leads), ungated; iframes load /inbox and /leads
       if (u0.hostname.startsWith("chirag.")) {
+        if (u0.pathname === "/api/sendmail" && request.method === "POST") {
+          if (!checkOwnerBasic(request, env))
+            return new Response('{"error":"login required"}',
+              { status: 401, headers: { "Content-Type": "application/json" } });
+          return sendLeadEmail(request, env, u0.origin);
+        }
         if (u0.pathname === "/api/leadflag" && request.method === "POST" && env.FLAGS) {
           let d = {};
           try { d = await request.json(); } catch {}
           if (d.lead_id) {
             await env.FLAGS.put("lead:" + d.lead_id, JSON.stringify({
-              name: (d.name || "").slice(0, 120), by: "chirag-host", ts: new Date().toISOString(),
+              name: (d.name || "").slice(0, 120), kind: (d.kind || "already_messaged").slice(0, 40),
+              by: "chirag-host", ts: new Date().toISOString(),
             }));
             return new Response('{"ok":true}', { headers: { "Content-Type": "application/json" } });
           }
@@ -55,7 +127,7 @@ export default {
           }
           return new Response(JSON.stringify(out), { headers: { "Content-Type": "application/json" } });
         }
-        const pass = new Set(["/inbox", "/leads", "/ceo", "/logo.png"]);
+        const pass = new Set(["/inbox", "/leads", "/ceo", "/logo.png", "/sig-logo.png"]);
         if (!pass.has(u0.pathname)) u0.pathname = "/chirag";
         return env.ASSETS.fetch(new Request(u0.toString(), request));
       }
@@ -97,6 +169,12 @@ export default {
           return new Response(JSON.stringify({ ok: true }),
             { headers: { "Content-Type": "application/json" } });
         }
+        if (url0.pathname === "/api/sendmail" && request.method === "POST") {
+          if ((u.team || "") !== "all")
+            return new Response('{"error":"owner only"}',
+              { status: 403, headers: { "Content-Type": "application/json" } });
+          return sendLeadEmail(request, env, url0.origin);
+        }
         if (url0.pathname === "/api/leadflag" && request.method === "POST") {
           if (!env.FLAGS) return new Response(JSON.stringify({ error: "KV binding FLAGS not configured" }),
             { status: 503, headers: { "Content-Type": "application/json" } });
@@ -105,7 +183,8 @@ export default {
           if (!d.lead_id) return new Response(JSON.stringify({ error: "lead_id required" }),
             { status: 400, headers: { "Content-Type": "application/json" } });
           await env.FLAGS.put("lead:" + d.lead_id, JSON.stringify({
-            name: (d.name || "").slice(0, 120), by: email, ts: new Date().toISOString(),
+            name: (d.name || "").slice(0, 120), kind: (d.kind || "already_messaged").slice(0, 40),
+            by: email, ts: new Date().toISOString(),
           }));
           return new Response(JSON.stringify({ ok: true }),
             { headers: { "Content-Type": "application/json" } });

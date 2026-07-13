@@ -138,6 +138,31 @@ def infer_dial(loc, school):
         if any(k in t for k in keys): return dial
     return None
 
+_GULF=("uae","dubai","abu dhabi","sharjah","emirates","qatar","doha","saudi","riyadh","jeddah",
+       "kuwait","bahrain","oman","muscat")
+def attach_files(program, loc, school, phone):
+    """Marketing files to attach, based on program + region (USD default, AED for Gulf)."""
+    p=(program or "").lower(); t=f"{loc} {school}".lower()
+    aed = any(k in t for k in _GULF) or (phone or "").startswith(("971","966","965","973","968","974"))
+    cur = "AED" if aed else "USD"
+    f=[]
+    if "sat" in p or "psat" in p:
+        f=["SAT Brochure.pdf","SAT Scores 2025-26.pdf"]
+        f.append("SAT (AED).jpeg" if aed else "SAT (USD).jpeg")
+        if "psat" in p: f.append("PSAT Prep.png")
+    elif "act" in p: f=["SAT Brochure.pdf","SAT Scores 2025-26.pdf"]
+    elif p.startswith("ap") or " ap " in f" {p} ":
+        f=["AP Guru_s 2025 AP Scores.pdf", f"AP {cur}.png"]
+    elif "myp" in p: f=[f"MYP {cur}.png"]
+    elif "ib" in p: f=[f"IB {cur}.png"]
+    elif "igcse" in p or "gcse" in p: f=[f"IGCSE {cur}.png"]
+    elif "a-level" in p or "alevel" in p or "a level" in p: f=[f"ALEVEL {cur}.png"]
+    else:
+        for k,fn in (("gmat","GMAT.png"),("gre","GRE.png"),("ucat","UCAT.png"),("tmua","TMUA.png"),
+                     ("lnat","LNAT.png"),("esat","ESAT.png"),("step","STEP.png"),("amc","AMC.png")):
+            if k in p: f=[fn]; break
+    return ["marketing/"+x for x in f]
+
 def parse_lead(raw):
     f = raw["fields"]
     first = _field(f, "first name", "firstname", "name")
@@ -166,20 +191,29 @@ def dm_index():
     """last-10-digits of partner phone -> chat status."""
     try: recs = json.load(open(os.path.join(here, "dms_latest.json")))
     except Exception: recs = []
-    chats = {}
+    chats = {}; raw_by_chat = {}
     for r in recs:
         ts = _iso(r["timestamp"])
         if not ts: continue
         chats.setdefault(r["group_id"], []).append((ts, bool(r.get("is_self")),
                                                     r.get("sender") or ""))
+        raw_by_chat.setdefault(r["group_id"], []).append(r)
     idx = {}
     for cid, msgs in chats.items():
         msgs.sort()
         ph = None
+        selfd = set()
         for _, self_, sender in msgs:
-            if not self_:
-                d = re.sub(r"\D", "", sender)
-                if 10 <= len(d) <= 13: ph = d; break
+            d = re.sub(r"\D", "", sender)
+            if self_: selfd.add(d)
+            elif not ph and 10 <= len(d) <= 13: ph = d
+        if not ph:
+            # outbound-only chat (sent first touch, no reply yet):
+            # take the attendee number that isn't the owner's
+            for m in raw_by_chat.get(cid, []):
+                for a in (m.get("att") or []):
+                    if a not in selfd: ph = a; break
+                if ph: break
         if not ph: continue
         last_ts, last_self, _ = msgs[-1]
         first_out = next((t for t, s, _ in msgs if s), None)
@@ -295,6 +329,7 @@ def build():
     idx = dm_index()
     for L in leads:
         st = idx.get(L["phone"][-10:]) if L["phone"] else None
+        L["prior"] = st   # any existing chat with this number = history worth seeing
         if not st or not st["contacted"]:
             L["status"] = "new"
         elif st["they_replied_after"] and not st["last_self"]:
@@ -330,18 +365,33 @@ def build():
                 L["phone"] = cd + L["phone"]
 
     # ---------------- render ----------------
+    def _prior_tag(L):
+        p = L.get("prior")
+        if not p: return ""
+        who = "they messaged you" if not p["last_self"] else "prior chat"
+        return (f'<span class=hist title="A WhatsApp conversation with this number already exists">'
+                f'&#128172; {who} · last {eng.when(p["last_ts"])} IST</span>')
+
     def card(L, mode):
         d = acache.get(L["id"]) or {}
         prog = d.get("program", "")
         txt = d.get("first_touch" if mode == "new" else "follow_up", "")
         sub = f'{esc(L["loc"])}{" · " + esc(L["school"]) if L["school"] else ""}'
         badge = ("new lead", "#0891b2") if mode == "new" else ("follow-up due", "#b54708")
+        from urllib.parse import quote
         mail = ""
-        if mode == "followup" and L["email"]:
-            from urllib.parse import quote
-            mail = (f'<a class=mailbtn href="mailto:{esc(L["email"])}'
-                    f'?subject={quote(d.get("email_subject","Following up - AP Guru"))}'
-                    f'&body={quote(d.get("email_body",""))}">Email &#9993;</a>')
+        if L["email"]:
+            if mode == "followup":
+                msub, mbody = d.get("email_subject","Following up - AP Guru"), d.get("email_body","")
+            else:
+                msub, mbody = f'{(prog + " prep - ") if prog else ""}AP Guru', txt
+            _files = attach_files(prog, L["loc"], L["school"], L["phone"])
+            mail = (f'<button class=sendmail data-to="{esc(L["email"])}" '
+                    f'data-name="{esc(L["first"])} {esc(L["last"])}" data-sub="{esc(msub)}" '
+                    f'data-files="{esc(json.dumps(_files))}" '
+                    f'data-mode="{mode}">Send email &#9993;{(" (+" + str(len(_files)) + " files)") if _files else ""}</button>'
+                    f'<a class=mailfall href="mailto:{esc(L["email"])}'
+                    f'?subject={quote(msub)}&body={quote(mbody)}" title="Open in your mail app instead">mail app</a>')
         wa = (f'<button class=send data-wa="{L["phone"]}">Open in WhatsApp &#8599;</button>'
               if L["phone"] else '<span class=meta>no phone parsed</span>')
         details = ""
@@ -352,12 +402,15 @@ def build():
                 f'<div class=itop><span class=badge style="color:{badge[1]};border-color:{badge[1]}">{badge[0]}</span>'
                 f'<span class=gname>{esc(L["first"])} {esc(L["last"])}</span>'
                 f'{f"<span class=pill>{esc(prog)}</span>" if prog else ""}'
+                f'{_prior_tag(L)}'
                 f'<span class=meta>submitted {eng.when(L["submitted"])} IST</span>'
                 f'<button class=already data-lid="{esc(L["id"])}" data-name="{esc(L["first"])} {esc(L["last"])}" '
-                f'title="I contacted this lead another way — remove permanently">already messaged</button>'
+                f'data-kind="{"no_followup" if mode == "followup" else "already_messaged"}" '
+                f'title="Remove permanently — the system records why">'
+                f'{"no follow-up" if mode == "followup" else "already messaged"}</button>'
                 f'<button class=skip title="Hide this lead on this device">done</button></div>'
                 f'{details}'
-                f'<textarea class=draft rows=4>{esc(txt)}</textarea>'
+                f'<textarea class=draft rows=4 data-ebody="{esc(d.get("email_body","") if mode=="followup" else "")}">{esc(txt)}</textarea>'
                 f'<div class=actions>{mail}{wa}</div></div>')
 
     new_rows = "".join(card(L, "new") for L in leads if L["status"] == "new")
@@ -385,6 +438,7 @@ h2{{font-size:14px;background:#f5f7fb;border-left:3px solid #16243f;padding:8px 
 .badge{{font-size:10.5px;font-weight:700;text-transform:uppercase;border:1px solid;border-radius:20px;padding:2px 9px}}
 .gname{{font-weight:600;font-size:15px}} .meta{{font-size:11px;color:#98a2b3}}
 .pill{{font-size:11px;background:#eef2ff;color:#5b21b6;border-radius:20px;padding:2px 9px;font-weight:600}}
+.hist{{font-size:11px;background:#fff7e6;color:#b54708;border:1px solid #fde3b8;border-radius:20px;padding:2px 9px;font-weight:600;white-space:nowrap}}
 .already{{margin-left:auto;font-size:11px;color:#0891b2;background:#ecfeff;border:1px solid #a5f3fc;border-radius:20px;padding:3px 11px;cursor:pointer}}
 .skip{{font-size:11px;color:#067647;background:#ecfdf3;border:1px solid #bfe8d2;border-radius:20px;padding:3px 11px;cursor:pointer}}
 .msg{{font-size:13px;color:#374151;font-style:italic;margin:4px 0}}
@@ -392,6 +446,9 @@ h2{{font-size:14px;background:#f5f7fb;border-left:3px solid #16243f;padding:8px 
 .draft{{width:100%;margin-top:8px;font:13.5px/1.5 inherit;padding:9px 11px;border:1px solid #d7dbe3;border-radius:10px;resize:vertical}}
 .actions{{margin-top:8px;display:flex;gap:8px;justify-content:flex-end}}
 .send{{font-size:13px;font-weight:600;color:#fff;background:#128c4b;border:none;border-radius:22px;padding:8px 18px;cursor:pointer}}
+.sendmail{{font-size:13px;font-weight:600;color:#fff;background:#16243f;border:none;border-radius:22px;padding:8px 16px;cursor:pointer}}
+.sendmail:disabled{{background:#94a3b8}}
+.mailfall{{font-size:11px;color:#98a2b3;align-self:center;text-decoration:underline;margin-right:2px}}
 .mailbtn{{font-size:13px;font-weight:600;color:#16243f;background:#eef2ff;border:1px solid #d7dbe3;border-radius:22px;padding:8px 16px;text-decoration:none}}
 .empty{{color:#067647;padding:12px 4px;font-size:13.5px}}
 .note{{font-size:11.5px;color:#98a2b3;margin-top:16px}}
@@ -423,14 +480,50 @@ if(hidden){{
   a.onclick=function(ev){{ev.preventDefault();localStorage.removeItem(KEY);location.reload();}};
   note.appendChild(a);
 }}
+function ownerAuth(force){{
+  var pw=localStorage.getItem('dash_pw');
+  if(!pw||force){{
+    pw=prompt('Enter your dashboard password (all@apguru.com) to send email:');
+    if(pw===null) return null;
+    localStorage.setItem('dash_pw',pw);
+  }}
+  return 'Basic '+btoa('all@apguru.com:'+pw);
+}}
 document.addEventListener('click',async function(e){{
+  var sm=e.target.closest('.sendmail');
+  if(sm){{
+    var it=sm.closest('.item');
+    var body=(sm.dataset.mode==='followup' && it.querySelector('.draft').dataset.ebody)
+             ? it.querySelector('.draft').dataset.ebody
+             : it.querySelector('.draft').value;
+    if(!body){{alert('Draft is empty — write the message first.');return;}}
+    var auth=ownerAuth(false); if(auth===null) return;
+    sm.disabled=true; sm.textContent='sending…';
+    try{{
+      var r=await fetch('/api/sendmail',{{method:'POST',
+        headers:{{'Content-Type':'application/json','Authorization':auth}},
+        body:JSON.stringify({{to:sm.dataset.to,name:sm.dataset.name,subject:sm.dataset.sub,body:body,files:JSON.parse(sm.dataset.files||'[]')}})}});
+      if(r.status===401){{localStorage.removeItem('dash_pw');
+        var a2=ownerAuth(true); if(a2===null){{sm.disabled=false;sm.textContent='Send email \u2709';return;}}
+        r=await fetch('/api/sendmail',{{method:'POST',
+          headers:{{'Content-Type':'application/json','Authorization':a2}},
+          body:JSON.stringify({{to:sm.dataset.to,name:sm.dataset.name,subject:sm.dataset.sub,body:body,files:JSON.parse(sm.dataset.files||'[]')}})}});
+      }}
+      if(!r.ok) throw new Error(await r.text());
+      sm.textContent='emailed \u2713';
+    }}catch(err){{
+      sm.disabled=false; sm.textContent='Send email \u2709';
+      alert('Send failed: '+(err.message||err).slice(0,300));
+    }}
+    return;
+  }}
   var am=e.target.closest('.already');
   if(am){{
     var it=am.closest('.item');
     am.disabled=true; am.textContent='saving…';
     try{{
       var r=await fetch('/api/leadflag',{{method:'POST',headers:{{'Content-Type':'application/json'}},
-        body:JSON.stringify({{lead_id:am.dataset.lid,name:am.dataset.name}})}});
+        body:JSON.stringify({{lead_id:am.dataset.lid,name:am.dataset.name,kind:am.dataset.kind}})}});
       if(!r.ok) throw 0;
       dism[it.dataset.key]=Date.now(); save(dism);
       it.style.display='none';
