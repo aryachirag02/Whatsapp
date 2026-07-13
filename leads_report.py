@@ -130,7 +130,7 @@ _DIAL_HINTS=[  # (keywords in location/school, dial code)
  (("switzerland","zurich","geneva"),"41"), (("germany","berlin","munich","frankfurt"),"49"),
  (("netherlands","amsterdam"),"31"), (("japan","tokyo"),"81"), (("thailand","bangkok"),"66"),
  (("indonesia","jakarta"),"62"), (("malaysia","kuala lumpur"),"60"),
- (("india","mumbai","delhi","bangalore","bengaluru","chennai","hyderabad","pune","kolkata","gurgaon","noida","ahmedabad"),"91"),
+ (("india","mumbai","delhi","bangalore","bengaluru","chennai","hyderabad","pune","kolkata","gurgaon","gurugram","noida","ahmedabad","jaipur","lucknow","chandigarh","indore","surat","nagpur","bhopal","patna","kochi","cochin","coimbatore","vadodara","thane","goa","dehradun","bhubaneswar","visakhapatnam","mysore","mysuru"),"91"),
 ]
 def infer_dial(loc, school):
     t=f"{loc} {school}".lower()
@@ -209,12 +209,24 @@ def wa_checker():
                 ok = (r.status == 200)
         except urllib.error.HTTPError as e:
             ok = False if e.code == 404 else None
-        except Exception:
+            if ok is None: print(f"leads wa-check: HTTP {e.code} for a lookup (treating as unknown)", flush=True)
+        except Exception as e:
             ok = None
+            print(f"leads wa-check: {type(e).__name__} (treating as unknown)", flush=True)
         if ok is not None: cache[phone] = ok
         return ok
-    def save(): json.dump(cache, open(_WA_CACHE_P, "w"))
-    return check, save
+    stats={"yes":0,"no":0,"unk":0,"err":""}
+    _check=check
+    def check2(phone):
+        r=_check(phone)
+        if r is True: stats["yes"]+=1
+        elif r is False: stats["no"]+=1
+        else: stats["unk"]+=1
+        return r
+    def save():
+        json.dump(cache, open(_WA_CACHE_P, "w"))
+        print(f"leads wa-check: {stats['yes']} on WhatsApp, {stats['no']} not, {stats['unk']} unknown", flush=True)
+    return check2, save
 
 def dm_index():
     """last-10-digits of partner phone -> chat status."""
@@ -330,9 +342,17 @@ def build():
         if L["phone"] and len(L["phone"]) <= 10 and dial:
             L["phone"] = dial + L["phone"]
         L["dial_guess"] = dial
-        # India exclusion: explicit +91 numbers, or Indian location with a bare number
-        if (L["phone"].startswith("91") and len(L["phone"]) == 12) or            (dial == "91" and (not L["phone"] or len(L["phone"]) <= 12)):
-            skipped_india += 1; continue
+        # India exclusion (layered): +91 phone, inferred Indian dial, or Indian location text
+        _is_india = (
+            (L["phone"].startswith("91") and len(L["phone"]) == 12) or
+            (dial == "91") or
+            ("india" in f'{L["loc"]} {L["school"]}'.lower())
+        )
+        if _is_india:
+            skipped_india += 1
+            if skipped_india <= 5:
+                print(f"leads: excluded (India): {L['first']} {L['last']} · {L['loc']}", flush=True)
+            continue
         leads.append(L)
     leads.sort(key=lambda x: -x["submitted"].timestamp())
     print(f"leads: window={len(leads)} | outside {LEAD_WINDOW_DAYS}d={skipped_old} | no-date={skipped_nodate} | india={skipped_india}", flush=True)
@@ -350,8 +370,9 @@ def build():
                 if not base.get(fld) and L.get(fld): base[fld]=L[fld]
     leads=[_by[k] for k in _order]
 
-    try: MANUAL=set(json.load(open(os.path.join(here,"lead_flags.json"))).keys())
-    except Exception: MANUAL=set()
+    try: LFLAGS=json.load(open(os.path.join(here,"lead_flags.json")))
+    except Exception: LFLAGS={}
+    MANUAL=set(LFLAGS.keys())
     n_manual=sum(1 for L in leads if L["id"] in MANUAL)
     leads=[L for L in leads if L["id"] not in MANUAL]
 
@@ -369,10 +390,15 @@ def build():
             L["status"] = "waiting"
 
     # WhatsApp presence for actionable leads (cached; capped per run)
+    try: WAFLAGS=set(json.load(open(os.path.join(here,"wa_flags.json"))).keys())
+    except Exception: WAFLAGS=set()
     wa_check, wa_save = wa_checker()
     for L in leads:
         if L["status"] in ("new", "followup") and L["phone"]:
-            L["wa"] = wa_check(L["phone"])
+            if L["phone"] in WAFLAGS or L["phone"][-10:] in {p[-10:] for p in WAFLAGS}:
+                L["wa"] = False          # you marked it: not on WhatsApp
+            else:
+                L["wa"] = wa_check(L["phone"])
     wa_save()
 
     # AI drafts (cached per lead id)
@@ -399,6 +425,16 @@ def build():
             cd = re.sub(r"\D", "", str((acache.get(L["id"]) or {}).get("country_dial") or ""))
             if 1 <= len(cd) <= 3:
                 L["phone"] = cd + L["phone"]
+    # final net: AI judged the lead Indian (dial 91) -> exclude
+    _keep = []
+    for L in leads:
+        if re.sub(r"\D", "", str((acache.get(L["id"]) or {}).get("country_dial") or "")) == "91" \
+           or (L["phone"].startswith("91") and len(L["phone"]) == 12):
+            skipped_india += 1
+            print(f"leads: excluded (India, AI net): {L['first']} {L['last']}", flush=True)
+            continue
+        _keep.append(L)
+    leads = _keep
 
     # ---------------- render ----------------
     def _prior_tag(L):
@@ -422,14 +458,18 @@ def build():
             else:
                 msub, mbody = f'{(prog + " prep - ") if prog else ""}AP Guru', txt
             _files = attach_files(prog, L["loc"], L["school"], L["phone"])
+            _links = [("https://chirag.apguru.com/" + "/".join(quote(seg) for seg in f.split("/")),
+                       f.split("/")[-1].rsplit(".",1)[0]) for f in _files]
             mail = (f'<button class=sendmail data-to="{esc(L["email"])}" '
-                    f'data-name="{esc(L["first"])} {esc(L["last"])}" data-sub="{esc(msub)}" '
-                    f'data-files="{esc(json.dumps(_files))}" '
-                    f'data-mode="{mode}">Send email &#9993;{(" (+" + str(len(_files)) + " files)") if _files else ""}</button>')
+                    f'data-sub="{esc(msub)}" data-mode="{mode}" '
+                    f'data-links="{esc(json.dumps(_links))}" '
+                    f'data-ebody="{esc(mbody if mode=="followup" else "")}">'
+                    f'Open in Gmail &#9993;{(" (+" + str(len(_links)) + " links)") if _links else ""}</button>')
         if L["phone"] and L.get("wa") is False:
             wa = '<span class=meta>not on WhatsApp — email them</span>'
         elif L["phone"]:
-            wa = f'<button class=send data-wa="{L["phone"]}">Open in WhatsApp &#8599;</button>'
+            wa = (f'<button class=send data-wa="{L["phone"]}">Open in WhatsApp &#8599;</button>'
+                  f'<button class=nowa data-ph="{L["phone"]}" title="This number is not on WhatsApp — switch this lead to email">no WhatsApp?</button>')
         else:
             wa = '<span class=meta>no phone parsed</span>'
 
@@ -446,7 +486,10 @@ def build():
                 f'<button class=already data-lid="{esc(L["id"])}" data-name="{esc(L["first"])} {esc(L["last"])}" '
                 f'data-kind="{"no_followup" if mode == "followup" else "already_messaged"}" '
                 f'title="Remove permanently — the system records why">'
-                f'{"no follow-up" if mode == "followup" else "already messaged"}</button></div>'
+                f'{"no follow-up" if mode == "followup" else "already messaged"}</button>'
+                f'<button class=already data-lid="{esc(L["id"])}" data-name="{esc(L["first"])} {esc(L["last"])}" '
+                f'data-kind="not_relevant" data-ask="1" '
+                f'title="Not a real lead — remove permanently with a reason">not relevant</button></div>'
                 f'{details}'
                 f'<textarea class=draft rows=4 data-ebody="{esc(d.get("email_body","") if mode=="followup" else "")}">{esc(txt)}</textarea>'
                 f'<div class=actions>{mail}{wa}</div></div>')
@@ -458,6 +501,18 @@ def build():
     if not new_rows: new_rows = '<div class=empty>No uncontacted leads &#10003;</div>'
     if not fu_rows: fu_rows = '<div class=empty>No follow-ups due &#10003;</div>'
     note_extra = f' · {esc(fetch_note)}' if fetch_note else ''
+
+    _kl={"already_messaged":"already messaged","no_followup":"no follow-up","not_relevant":"not relevant"}
+    _mrows=""
+    for lid,meta in sorted(LFLAGS.items(), key=lambda kv:(kv[1] or {}).get("ts",""), reverse=True)[:60]:
+        meta=meta or {}
+        _mrows+=(f'<div class=mrow><b>{esc(meta.get("name") or lid)}</b>'
+                 f' · {esc(_kl.get(meta.get("kind"),"muted"))}'
+                 f'{(" · &ldquo;"+esc(meta.get("reason",""))+"&rdquo;") if meta.get("reason") else ""}'
+                 f'<span class=meta> · {esc((meta.get("ts") or "")[:10])}</span></div>')
+    muted_html=(f'<details style="margin-top:14px"><summary>Muted leads — {len(LFLAGS)} '
+                f'(already messaged / no follow-up / not relevant)</summary>{_mrows}</details>'
+                if LFLAGS else "")
 
     IST = eng.IST
     H = f"""<!DOCTYPE html><html><head><meta charset=utf-8>
@@ -479,6 +534,8 @@ h2{{font-size:14px;background:#f5f7fb;border-left:3px solid #16243f;padding:8px 
 .hist{{font-size:11px;background:#fff7e6;color:#b54708;border:1px solid #fde3b8;border-radius:20px;padding:2px 9px;font-weight:600;white-space:nowrap}}
 .already{{margin-left:auto;font-size:11px;color:#98a2b3;background:none;border:none;text-decoration:underline;cursor:pointer;padding:2px 4px}}
 .already:hover{{color:#0891b2}}
+.nowa{{font-size:11px;color:#98a2b3;background:none;border:none;text-decoration:underline;cursor:pointer;align-self:center}}
+.nowa:hover{{color:#b54708}}
 .skip{{font-size:11px;color:#067647;background:#ecfdf3;border:1px solid #bfe8d2;border-radius:20px;padding:3px 11px;cursor:pointer}}
 .msg{{font-size:13px;color:#374151;font-style:italic;margin:4px 0}}
 .frow{{font-size:12.5px;color:#374151;margin:2px 0}} .frow b{{color:#6b7280;font-weight:600}}
@@ -489,6 +546,7 @@ h2{{font-size:14px;background:#f5f7fb;border-left:3px solid #16243f;padding:8px 
 .sendmail:disabled{{background:#94a3b8}}
 .mailbtn{{font-size:13px;font-weight:600;color:#16243f;background:#eef2ff;border:1px solid #d7dbe3;border-radius:22px;padding:8px 16px;text-decoration:none}}
 .empty{{color:#067647;padding:12px 4px;font-size:13.5px}}
+.mrow{{font-size:12.5px;color:#374151;padding:5px 2px;border-bottom:1px solid #f1f3f7}}
 .note{{font-size:11.5px;color:#98a2b3;margin-top:16px}}
 @media(max-width:700px){{.sheet{{margin:0;border-radius:0;padding:16px 12px}}}}
 </style></head><body>
@@ -500,6 +558,7 @@ h2{{font-size:14px;background:#f5f7fb;border-left:3px solid #16243f;padding:8px 
 {new_rows}
 <h2>Follow-up due (no reply for {FOLLOWUP_HOURS}h+)</h2>
 {fu_rows}
+{muted_html}
 <div class=note>Edit the draft, then Open in WhatsApp / Email and tap send yourself. "done" hides a card on this device. <a href="/inbox">Reply inbox</a> · <a href="/ceo">Worry list</a></div>
 </div>
 <script>
@@ -518,51 +577,39 @@ if(hidden){{
   a.onclick=function(ev){{ev.preventDefault();localStorage.removeItem(KEY);location.reload();}};
   note.appendChild(a);
 }}
-function ownerAuth(force){{
-  var pw=localStorage.getItem('dash_pw');
-  if(!pw||force){{
-    pw=prompt('Enter your dashboard password (all@apguru.com) to send email:');
-    if(pw===null) return null;
-    localStorage.setItem('dash_pw',pw);
-  }}
-  return 'Basic '+btoa('all@apguru.com:'+pw);
-}}
 document.addEventListener('click',async function(e){{
   var sm=e.target.closest('.sendmail');
   if(sm){{
     var it=sm.closest('.item');
-    var body=(sm.dataset.mode==='followup' && it.querySelector('.draft').dataset.ebody)
-             ? it.querySelector('.draft').dataset.ebody
+    var body=(sm.dataset.mode==='followup' && sm.dataset.ebody)
+             ? sm.dataset.ebody
              : it.querySelector('.draft').value;
     if(!body){{alert('Draft is empty — write the message first.');return;}}
-    var auth=ownerAuth(false); if(auth===null) return;
-    sm.disabled=true; sm.textContent='sending…';
-    try{{
-      var r=await fetch('/api/sendmail',{{method:'POST',
-        headers:{{'Content-Type':'application/json','Authorization':auth}},
-        body:JSON.stringify({{to:sm.dataset.to,name:sm.dataset.name,subject:sm.dataset.sub,body:body,files:JSON.parse(sm.dataset.files||'[]')}})}});
-      if(r.status===401){{localStorage.removeItem('dash_pw');
-        var a2=ownerAuth(true); if(a2===null){{sm.disabled=false;sm.textContent='Send email \u2709';return;}}
-        r=await fetch('/api/sendmail',{{method:'POST',
-          headers:{{'Content-Type':'application/json','Authorization':a2}},
-          body:JSON.stringify({{to:sm.dataset.to,name:sm.dataset.name,subject:sm.dataset.sub,body:body,files:JSON.parse(sm.dataset.files||'[]')}})}});
-      }}
-      if(!r.ok) throw new Error(await r.text());
-      sm.textContent='emailed \u2713';
-      dism[sm.closest('.item').dataset.key]=Date.now(); save(dism);
-    }}catch(err){{
-      sm.disabled=false; sm.textContent='Send email \u2709';
-      alert('Send failed: '+(err.message||err).slice(0,300));
+    var links=[];
+    try{{links=JSON.parse(sm.dataset.links||'[]');}}catch(e2){{}}
+    if(links.length){{
+      body+='\n\nUseful resources:';
+      links.forEach(function(l){{ body+='\n- '+l[1]+': '+l[0]; }});
     }}
+    var u='https://mail.google.com/mail/?view=cm&fs=1&to='+encodeURIComponent(sm.dataset.to)
+         +'&su='+encodeURIComponent(sm.dataset.sub)
+         +'&body='+encodeURIComponent(body);
+    window.open(u,'_blank');
+    dism[it.dataset.key]=Date.now(); save(dism);   // acted -> gone on next reload
     return;
   }}
   var am=e.target.closest('.already');
   if(am){{
     var it=am.closest('.item');
+    var why='';
+    if(am.dataset.ask){{
+      why=prompt('Why is this lead not relevant? (e.g. spam, test entry, duplicate, existing student)');
+      if(why===null) return;
+    }}
     am.disabled=true; am.textContent='saving…';
     try{{
       var r=await fetch('/api/leadflag',{{method:'POST',headers:{{'Content-Type':'application/json'}},
-        body:JSON.stringify({{lead_id:am.dataset.lid,name:am.dataset.name,kind:am.dataset.kind}})}});
+        body:JSON.stringify({{lead_id:am.dataset.lid,name:am.dataset.name,kind:am.dataset.kind,reason:why}})}});
       if(!r.ok) throw 0;
       dism[it.dataset.key]=Date.now(); save(dism);
       it.style.display='none';
@@ -574,6 +621,22 @@ document.addEventListener('click',async function(e){{
   }}
   var sk=e.target.closest('.skip');
   if(sk){{var it=sk.closest('.item');dism[it.dataset.key]=Date.now();save(dism);it.style.display='none';return;}}
+  var nw=e.target.closest('.nowa');
+  if(nw){{
+    var it=nw.closest('.item');
+    nw.disabled=true; nw.textContent='saving…';
+    try{{
+      var r=await fetch('/api/waflag',{{method:'POST',headers:{{'Content-Type':'application/json'}},
+        body:JSON.stringify({{phone:nw.dataset.ph}})}});
+      if(!r.ok) throw 0;
+      var act=it.querySelector('.actions');
+      it.querySelector('.send').remove(); nw.remove();
+      var sp=document.createElement('span'); sp.className='meta';
+      sp.textContent='not on WhatsApp — email them';
+      act.insertBefore(sp, act.firstChild);
+    }}catch(err){{ nw.disabled=false; nw.textContent='no WhatsApp?'; alert('Could not save.'); }}
+    return;
+  }}
   var b=e.target.closest('.send');
   if(b){{
     var it=b.closest('.item');

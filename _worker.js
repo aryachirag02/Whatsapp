@@ -112,6 +112,7 @@ export default {
           if (d.lead_id) {
             await env.FLAGS.put("lead:" + d.lead_id, JSON.stringify({
               name: (d.name || "").slice(0, 120), kind: (d.kind || "already_messaged").slice(0, 40),
+            reason: (d.reason || "").slice(0, 200),
               by: "chirag-host", ts: new Date().toISOString(),
             }));
             return new Response('{"ok":true}', { headers: { "Content-Type": "application/json" } });
@@ -127,8 +128,24 @@ export default {
           }
           return new Response(JSON.stringify(out), { headers: { "Content-Type": "application/json" } });
         }
+        if (u0.pathname === "/api/waflag" && request.method === "POST" && env.FLAGS) {
+          let d = {};
+          try { d = await request.json(); } catch {}
+          const ph = String(d.phone || "").replace(/\D/g, "");
+          if (ph.length >= 10 && ph.length <= 15) {
+            await env.FLAGS.put("wa:" + ph, "0");
+            return new Response('{"ok":true}', { headers: { "Content-Type": "application/json" } });
+          }
+          return new Response('{"error":"phone required"}', { status: 400, headers: { "Content-Type": "application/json" } });
+        }
+        if (u0.pathname === "/api/waflags" && env.FLAGS) {
+          const out = {};
+          const list = await env.FLAGS.list({ prefix: "wa:" });
+          for (const k of list.keys) out[k.name.slice(3)] = false;
+          return new Response(JSON.stringify(out), { headers: { "Content-Type": "application/json" } });
+        }
         const pass = new Set(["/inbox", "/leads", "/ceo", "/logo.png", "/sig-logo.png"]);
-        if (!pass.has(u0.pathname)) u0.pathname = "/chirag";
+        if (!pass.has(u0.pathname) && !u0.pathname.startsWith("/marketing/")) u0.pathname = "/chirag";
         return env.ASSETS.fetch(new Request(u0.toString(), request));
       }
       if (u0.pathname === "/ceo-a1e14bac51" || u0.pathname === "/ceo-a1e14bac51/") {
@@ -184,6 +201,7 @@ export default {
             { status: 400, headers: { "Content-Type": "application/json" } });
           await env.FLAGS.put("lead:" + d.lead_id, JSON.stringify({
             name: (d.name || "").slice(0, 120), kind: (d.kind || "already_messaged").slice(0, 40),
+            reason: (d.reason || "").slice(0, 200),
             by: email, ts: new Date().toISOString(),
           }));
           return new Response(JSON.stringify({ ok: true }),
@@ -199,6 +217,24 @@ export default {
           }
           return new Response(JSON.stringify(out, null, 1),
             { headers: { "Content-Type": "application/json" } });
+        }
+        if (url0.pathname === "/api/waflag" && request.method === "POST") {
+          if (!env.FLAGS) return new Response("{}", { headers: { "Content-Type": "application/json" } });
+          let d = {};
+          try { d = await request.json(); } catch {}
+          const ph = String(d.phone || "").replace(/\D/g, "");
+          if (ph.length >= 10 && ph.length <= 15) {
+            await env.FLAGS.put("wa:" + ph, "0");
+            return new Response('{"ok":true}', { headers: { "Content-Type": "application/json" } });
+          }
+          return new Response('{"error":"phone required"}', { status: 400, headers: { "Content-Type": "application/json" } });
+        }
+        if (url0.pathname === "/api/waflags" && request.method === "GET") {
+          if (!env.FLAGS) return new Response("{}", { headers: { "Content-Type": "application/json" } });
+          const out = {};
+          const list = await env.FLAGS.list({ prefix: "wa:" });
+          for (const k of list.keys) out[k.name.slice(3)] = false;
+          return new Response(JSON.stringify(out), { headers: { "Content-Type": "application/json" } });
         }
         if (url0.pathname === "/api/flags" && request.method === "GET") {
           if (!env.FLAGS) return new Response("{}", { headers: { "Content-Type": "application/json" } });
