@@ -372,7 +372,10 @@ def build():
 
     try: LFLAGS=json.load(open(os.path.join(here,"lead_flags.json")))
     except Exception: LFLAGS={}
-    MANUAL=set(LFLAGS.keys())
+    _EXCL={"already_messaged","no_followup","not_relevant","replied"}
+    MANUAL={lid for lid,m in LFLAGS.items() if (m or {}).get("kind","already_messaged") in _EXCL}
+    WASENT={lid:(m or {}).get("ts","") for lid,m in LFLAGS.items() if (m or {}).get("kind")=="wa_sent"}
+    n_replied_manual=sum(1 for m in LFLAGS.values() if (m or {}).get("kind")=="replied")
     n_manual=sum(1 for L in leads if L["id"] in MANUAL)
     leads=[L for L in leads if L["id"] not in MANUAL]
 
@@ -380,8 +383,12 @@ def build():
     for L in leads:
         st = idx.get(L["phone"][-10:]) if L["phone"] else None
         L["prior"] = st   # any existing chat with this number = history worth seeing
+        _wts = _iso(WASENT.get(L["id"]) or "") if L["id"] in WASENT else None
         if not st or not st["contacted"]:
-            L["status"] = "new"
+            if _wts:
+                L["status"] = "followup" if (as_of - _wts) > timedelta(hours=FOLLOWUP_HOURS) else "waiting"
+            else:
+                L["status"] = "new"
         elif st["they_replied_after"] and not st["last_self"]:
             L["status"] = "replied"
         elif st["last_self"] and (as_of - st["last_ts"]) > timedelta(hours=FOLLOWUP_HOURS):
@@ -390,16 +397,6 @@ def build():
             L["status"] = "waiting"
 
     # WhatsApp presence for actionable leads (cached; capped per run)
-    try: WAFLAGS=set(json.load(open(os.path.join(here,"wa_flags.json"))).keys())
-    except Exception: WAFLAGS=set()
-    wa_check, wa_save = wa_checker()
-    for L in leads:
-        if L["status"] in ("new", "followup") and L["phone"]:
-            if L["phone"] in WAFLAGS or L["phone"][-10:] in {p[-10:] for p in WAFLAGS}:
-                L["wa"] = False          # you marked it: not on WhatsApp
-            else:
-                L["wa"] = wa_check(L["phone"])
-    wa_save()
 
     # AI drafts (cached per lead id)
     apath = os.path.join(here, "leads_ai.json")
@@ -458,20 +455,16 @@ def build():
             else:
                 msub, mbody = f'{(prog + " prep - ") if prog else ""}AP Guru', txt
             _files = attach_files(prog, L["loc"], L["school"], L["phone"])
-            _links = [("https://chirag.apguru.com/" + "/".join(quote(seg) for seg in f.split("/")),
-                       f.split("/")[-1].rsplit(".",1)[0]) for f in _files]
             mail = (f'<button class=sendmail data-to="{esc(L["email"])}" '
                     f'data-sub="{esc(msub)}" data-mode="{mode}" '
-                    f'data-links="{esc(json.dumps(_links))}" '
                     f'data-ebody="{esc(mbody if mode=="followup" else "")}">'
-                    f'Open in Gmail &#9993;{(" (+" + str(len(_links)) + " links)") if _links else ""}</button>')
-        if L["phone"] and L.get("wa") is False:
-            wa = '<span class=meta>not on WhatsApp — email them</span>'
-        elif L["phone"]:
-            wa = (f'<button class=send data-wa="{L["phone"]}">Open in WhatsApp &#8599;</button>'
-                  f'<button class=nowa data-ph="{L["phone"]}" title="This number is not on WhatsApp — switch this lead to email">no WhatsApp?</button>')
-        else:
-            wa = '<span class=meta>no phone parsed</span>'
+                    f'Open in Gmail &#9993;</button>')
+        copyb = '<button class=copybtn title="Copy the message text">Copy message</button>'
+        wasent = (f'<button class=wasent data-lid="{esc(L["id"])}" data-name="{esc(L["first"])} {esc(L["last"])}" '
+                  f'title="I sent this on WhatsApp — start the follow-up clock">Sent on WhatsApp &#10003;</button>'
+                  if mode == "new" else "")
+        repl = (f'<button class=repl data-lid="{esc(L["id"])}" data-name="{esc(L["first"])} {esc(L["last"])}" '
+                f'title="They replied — no follow-ups needed">They replied &#10003;</button>')
 
         details = ""
         if L["loc"]:    details += f'<div class=frow><b>Location:</b> {esc(L["loc"])}</div>'
@@ -492,12 +485,12 @@ def build():
                 f'title="Not a real lead — remove permanently with a reason">not relevant</button></div>'
                 f'{details}'
                 f'<textarea class=draft rows=4 data-ebody="{esc(d.get("email_body","") if mode=="followup" else "")}">{esc(txt)}</textarea>'
-                f'<div class=actions>{mail}{wa}</div></div>')
+                f'<div class=actions>{copyb}{mail}{wasent}{repl}</div></div>')
 
     new_rows = "".join(card(L, "new") for L in leads if L["status"] == "new")
     fu_rows = "".join(card(L, "followup") for L in leads if L["status"] == "followup")
     n_wait = sum(1 for L in leads if L["status"] == "waiting")
-    n_rep = sum(1 for L in leads if L["status"] == "replied")
+    n_rep = sum(1 for L in leads if L["status"] == "replied") + n_replied_manual
     if not new_rows: new_rows = '<div class=empty>No uncontacted leads &#10003;</div>'
     if not fu_rows: fu_rows = '<div class=empty>No follow-ups due &#10003;</div>'
     note_extra = f' · {esc(fetch_note)}' if fetch_note else ''
@@ -542,6 +535,9 @@ h2{{font-size:14px;background:#f5f7fb;border-left:3px solid #16243f;padding:8px 
 .draft{{width:100%;margin-top:8px;font:13.5px/1.5 inherit;padding:9px 11px;border:1px solid #d7dbe3;border-radius:10px;resize:vertical}}
 .actions{{margin-top:8px;display:flex;gap:8px;justify-content:flex-end}}
 .send{{font-size:13px;font-weight:600;color:#fff;background:#128c4b;border:none;border-radius:22px;padding:8px 18px;cursor:pointer}}
+.copybtn{{font-size:13px;font-weight:600;color:#16243f;background:#eef2ff;border:1px solid #d7dbe3;border-radius:22px;padding:8px 16px;cursor:pointer}}
+.wasent{{font-size:13px;font-weight:600;color:#fff;background:#128c4b;border:none;border-radius:22px;padding:8px 16px;cursor:pointer}}
+.repl{{font-size:13px;font-weight:600;color:#067647;background:#ecfdf3;border:1px solid #bfe8d2;border-radius:22px;padding:8px 16px;cursor:pointer}}
 .sendmail{{font-size:13px;font-weight:600;color:#fff;background:#16243f;border:none;border-radius:22px;padding:8px 16px;cursor:pointer}}
 .sendmail:disabled{{background:#94a3b8}}
 .mailbtn{{font-size:13px;font-weight:600;color:#16243f;background:#eef2ff;border:1px solid #d7dbe3;border-radius:22px;padding:8px 16px;text-decoration:none}}
@@ -559,7 +555,7 @@ h2{{font-size:14px;background:#f5f7fb;border-left:3px solid #16243f;padding:8px 
 <h2>Follow-up due (no reply for {FOLLOWUP_HOURS}h+)</h2>
 {fu_rows}
 {muted_html}
-<div class=note>Edit the draft, then Open in WhatsApp / Email and tap send yourself. "done" hides a card on this device. <a href="/inbox">Reply inbox</a> · <a href="/ceo">Worry list</a></div>
+<div class=note>Copy the message and send it from WhatsApp yourself, then tap "Sent on WhatsApp" so the follow-up clock starts. "They replied" stops follow-ups. <a href="/inbox">Reply inbox</a> · <a href="/ceo">Worry list</a></div>
 </div>
 <script>
 var KEY='leads_done';
@@ -585,17 +581,39 @@ document.addEventListener('click',async function(e){{
              ? sm.dataset.ebody
              : it.querySelector('.draft').value;
     if(!body){{alert('Draft is empty — write the message first.');return;}}
-    var links=[];
-    try{{links=JSON.parse(sm.dataset.links||'[]');}}catch(e2){{}}
-    if(links.length){{
-      body+='\n\nUseful resources:';
-      links.forEach(function(l){{ body+='\n- '+l[1]+': '+l[0]; }});
-    }}
     var u='https://mail.google.com/mail/?view=cm&fs=1&to='+encodeURIComponent(sm.dataset.to)
          +'&su='+encodeURIComponent(sm.dataset.sub)
          +'&body='+encodeURIComponent(body);
     window.open(u,'_blank');
     dism[it.dataset.key]=Date.now(); save(dism);   // acted -> gone on next reload
+    return;
+  }}
+  var cb=e.target.closest('.copybtn');
+  if(cb){{
+    var it=cb.closest('.item');
+    try{{
+      await navigator.clipboard.writeText(it.querySelector('.draft').value);
+      var t=cb.textContent; cb.textContent='copied \u2713';
+      setTimeout(function(){{cb.textContent=t;}},1400);
+    }}catch(err){{ prompt('Copy the message:', it.querySelector('.draft').value); }}
+    return;
+  }}
+  var ws=e.target.closest('.wasent')||e.target.closest('.repl');
+  if(ws){{
+    var it=ws.closest('.item');
+    var kind=ws.classList.contains('wasent')?'wa_sent':'replied';
+    ws.disabled=true; ws.textContent='saving…';
+    try{{
+      var r=await fetch('/api/leadflag',{{method:'POST',headers:{{'Content-Type':'application/json'}},
+        body:JSON.stringify({{lead_id:ws.dataset.lid,name:ws.dataset.name,kind:kind}})}});
+      if(!r.ok) throw 0;
+      dism[it.dataset.key]=Date.now(); save(dism);
+      it.style.display='none';
+    }}catch(err){{
+      ws.disabled=false;
+      ws.textContent=(kind==='wa_sent')?'Sent on WhatsApp \u2713':'They replied \u2713';
+      alert('Could not save.');
+    }}
     return;
   }}
   var am=e.target.closest('.already');
@@ -621,29 +639,6 @@ document.addEventListener('click',async function(e){{
   }}
   var sk=e.target.closest('.skip');
   if(sk){{var it=sk.closest('.item');dism[it.dataset.key]=Date.now();save(dism);it.style.display='none';return;}}
-  var nw=e.target.closest('.nowa');
-  if(nw){{
-    var it=nw.closest('.item');
-    nw.disabled=true; nw.textContent='saving…';
-    try{{
-      var r=await fetch('/api/waflag',{{method:'POST',headers:{{'Content-Type':'application/json'}},
-        body:JSON.stringify({{phone:nw.dataset.ph}})}});
-      if(!r.ok) throw 0;
-      var act=it.querySelector('.actions');
-      it.querySelector('.send').remove(); nw.remove();
-      var sp=document.createElement('span'); sp.className='meta';
-      sp.textContent='not on WhatsApp — email them';
-      act.insertBefore(sp, act.firstChild);
-    }}catch(err){{ nw.disabled=false; nw.textContent='no WhatsApp?'; alert('Could not save.'); }}
-    return;
-  }}
-  var b=e.target.closest('.send');
-  if(b){{
-    var it=b.closest('.item');
-    var txt=it.querySelector('.draft').value;
-    window.open('https://wa.me/+'+b.dataset.wa+'?text='+encodeURIComponent(txt),'_blank');
-    dism[it.dataset.key]=Date.now(); save(dism);   // acted -> gone on next reload
-  }}
 }});
 (function(){{var cut=Date.now()-60*86400000,ch=false;
 for(var k in dism){{if(dism[k]<cut){{delete dism[k];ch=true;}}}} if(ch) save(dism);}})();
