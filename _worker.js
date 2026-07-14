@@ -145,7 +145,7 @@ export default {
           return new Response(JSON.stringify(out), { headers: { "Content-Type": "application/json" } });
         }
         const pass = new Set(["/inbox", "/leads", "/ceo", "/logo.png", "/sig-logo.png"]);
-        if (!pass.has(u0.pathname) && !u0.pathname.startsWith("/marketing/")) u0.pathname = "/chirag";
+        if (!pass.has(u0.pathname) && !u0.pathname.startsWith("/marketing/")) u0.pathname = "/leads";
         return env.ASSETS.fetch(new Request(u0.toString(), request));
       }
       if (u0.pathname === "/ceo-a1e14bac51" || u0.pathname === "/ceo-a1e14bac51/") {

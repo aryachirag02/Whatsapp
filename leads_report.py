@@ -549,13 +549,13 @@ h2{{font-size:14px;background:#f5f7fb;border-left:3px solid #16243f;padding:8px 
 <div class=brand><img src="logo.png" alt="" onerror="this.style.display='none'"></div>
 <div class=sheet>
 <h1>Website leads</h1>
-<div class=sub>last {LEAD_WINDOW_DAYS} days, newest first · {n_wait} awaiting their reply · {n_rep} replied (see <a href="/inbox">inbox</a>) · {skipped_india} Indian numbers excluded · {n_manual} marked already messaged · updated {(as_of+IST).strftime('%d %b %Y, %H:%M')} IST{note_extra}</div>
+<div class=sub>last {LEAD_WINDOW_DAYS} days, newest first · {n_wait} awaiting their reply · {n_rep} replied  · {skipped_india} Indian numbers excluded · {n_manual} marked already messaged · updated {(as_of+IST).strftime('%d %b %Y, %H:%M')} IST{note_extra}</div>
 <h2>New — send first touch</h2>
 {new_rows}
 <h2>Follow-up due (no reply for {FOLLOWUP_HOURS}h+)</h2>
 {fu_rows}
 {muted_html}
-<div class=note>Copy the message and send it from WhatsApp yourself, then tap "Sent on WhatsApp" so the follow-up clock starts. "They replied" stops follow-ups. <a href="/inbox">Reply inbox</a> · <a href="/ceo">Worry list</a></div>
+<div class=note>Copy the message and send it from WhatsApp yourself, then tap "Sent on WhatsApp" so the follow-up clock starts. "They replied" stops follow-ups. <a href="/ceo">Worry list</a></div>
 </div>
 <script>
 var KEY='leads_done';
