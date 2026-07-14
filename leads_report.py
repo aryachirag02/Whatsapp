@@ -289,10 +289,15 @@ SYSTEM = (
  "Also return \"country_dial\": the international dial code digits for the lead's country inferred from Location AND School Name (a school name often pins the city/state - use it). For the window, the school/city determines the US timezone; be precise."
 )
 
-def draft(api_key, lead):
+def draft(api_key, lead, examples=None):
+    ex = ""
+    if examples:
+        ex = ("REAL MESSAGES CHIRAG RECENTLY SENT (match his exact phrasing and any "
+              "personal touches he adds):\n" +
+              "\n---\n".join(examples[:6]) + "\n\n")
     body = json.dumps({"model": MODEL, "max_tokens": 500, "system": SYSTEM,
         "messages": [{"role": "user", "content":
-            f"Lead: {lead['first']} {lead['last']}\nLocation: {lead['loc']}\n"
+            f"{ex}Lead: {lead['first']} {lead['last']}\nLocation: {lead['loc']}\n"
             f"School: {lead['school']}\nTheir message: {lead['msg']}\n\nJSON:"}]}).encode()
     req = urllib.request.Request("https://api.anthropic.com/v1/messages", data=body,
         headers={"Content-Type": "application/json", "x-api-key": api_key,
@@ -391,7 +396,7 @@ def build():
                 L["status"] = "new"
         elif st["they_replied_after"] and not st["last_self"]:
             L["status"] = "replied"
-        elif st["last_self"] and (as_of - st["last_ts"]) > timedelta(hours=FOLLOWUP_HOURS):
+        elif st["last_self"] and (as_of - max([t for t in (st["last_ts"], _wts) if t])) > timedelta(hours=FOLLOWUP_HOURS):
             L["status"] = "followup"
         else:
             L["status"] = "waiting"
@@ -404,12 +409,27 @@ def build():
     except Exception: acache = {}
     acache = {k: v for k, v in acache.items() if v.get("v") == 4}   # template v4 only
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    # your edited, actually-sent messages (captured by "Message sent") teach the drafter
+    _sent_examples = []
+    _lead_by_id = {}
+    for raw in store.values():
+        _lead_by_id[raw.get("id")] = raw
+    for lid, meta in sorted(LFLAGS.items(), key=lambda kv: (kv[1] or {}).get("ts", ""), reverse=True):
+        meta = meta or {}
+        if meta.get("kind") == "wa_sent" and meta.get("text") and len(meta["text"]) > 40:
+            src = _lead_by_id.get(lid)
+            ctx = ""
+            if src:
+                Lp = parse_lead(src)
+                ctx = f"[lead from {Lp['loc'] or 'unknown'}; asked: {(Lp['msg'] or '')[:80]}]\n"
+            _sent_examples.append(ctx + meta["text"][:600])
+        if len(_sent_examples) >= 6: break
     new = 0
     for L in leads:
         if L["status"] in ("replied", "waiting"): continue
         if L["id"] in acache or not api_key or new >= MAX_NEW_AI: continue
         try:
-            d = draft(api_key, L); d["v"] = 4
+            d = draft(api_key, L, _sent_examples); d["v"] = 4
             acache[L["id"]] = d; new += 1
         except Exception as e:
             print(f"leads ai: skipped one ({type(e).__name__})", flush=True)
@@ -455,16 +475,22 @@ def build():
             else:
                 msub, mbody = f'{(prog + " prep - ") if prog else ""}AP Guru', txt
             _files = attach_files(prog, L["loc"], L["school"], L["phone"])
+            _files = attach_files(prog, L["loc"], L["school"], L["phone"]) if mode == "new" else []
+            _links = [("https://chirag.apguru.com/" + "/".join(quote(seg) for seg in f.split("/")),
+                       f.split("/")[-1].rsplit(".", 1)[0]) for f in _files]
             mail = (f'<button class=sendmail data-to="{esc(L["email"])}" '
                     f'data-sub="{esc(msub)}" data-mode="{mode}" '
+                    f'data-links="{esc(json.dumps(_links))}" '
                     f'data-ebody="{esc(mbody if mode=="followup" else "")}">'
-                    f'Open in Gmail &#9993;</button>')
+                    f'Open in Gmail &#9993;{(" (+" + str(len(_links)) + " links)") if _links else ""}</button>')
         copyb = '<button class=copybtn title="Copy the message text">Copy message</button>'
         wasent = (f'<button class=wasent data-lid="{esc(L["id"])}" data-name="{esc(L["first"])} {esc(L["last"])}" '
-                  f'title="I sent this on WhatsApp — start the follow-up clock">Sent on WhatsApp &#10003;</button>'
-                  if mode == "new" else "")
+                  f'title="I sent this (WhatsApp or email) — starts/resets the follow-up clock">Message sent &#10003;</button>')
         repl = (f'<button class=repl data-lid="{esc(L["id"])}" data-name="{esc(L["first"])} {esc(L["last"])}" '
                 f'title="They replied — no follow-ups needed">They replied &#10003;</button>')
+        mute1 = (f'<button class=already data-lid="{esc(L["id"])}" data-name="{esc(L["first"])} {esc(L["last"])}" '
+                 f'data-kind="no_followup" title="Stop following this lead up">no follow-up</button>'
+                 if mode == "followup" else "")
 
         details = ""
         if L["loc"]:    details += f'<div class=frow><b>Location:</b> {esc(L["loc"])}</div>'
@@ -476,10 +502,7 @@ def build():
                 f'{f"<span class=pill>{esc(prog)}</span>" if prog else ""}'
                 f'{_prior_tag(L)}'
                 f'<span class=meta>submitted {eng.when(L["submitted"])} IST</span>'
-                f'<button class=already data-lid="{esc(L["id"])}" data-name="{esc(L["first"])} {esc(L["last"])}" '
-                f'data-kind="{"no_followup" if mode == "followup" else "already_messaged"}" '
-                f'title="Remove permanently — the system records why">'
-                f'{"no follow-up" if mode == "followup" else "already messaged"}</button>'
+                f'{mute1}'
                 f'<button class=already data-lid="{esc(L["id"])}" data-name="{esc(L["first"])} {esc(L["last"])}" '
                 f'data-kind="not_relevant" data-ask="1" '
                 f'title="Not a real lead — remove permanently with a reason">not relevant</button></div>'
@@ -581,6 +604,12 @@ document.addEventListener('click',async function(e){{
              ? sm.dataset.ebody
              : it.querySelector('.draft').value;
     if(!body){{alert('Draft is empty — write the message first.');return;}}
+    var links=[];
+    try{{links=JSON.parse(sm.dataset.links||'[]');}}catch(e2){{}}
+    if(links.length){{
+      body+='\n\nUseful resources:';
+      links.forEach(function(l){{ body+='\n- '+l[1]+': '+l[0]; }});
+    }}
     var u='https://mail.google.com/mail/?view=cm&fs=1&to='+encodeURIComponent(sm.dataset.to)
          +'&su='+encodeURIComponent(sm.dataset.sub)
          +'&body='+encodeURIComponent(body);
@@ -602,10 +631,11 @@ document.addEventListener('click',async function(e){{
   if(ws){{
     var it=ws.closest('.item');
     var kind=ws.classList.contains('wasent')?'wa_sent':'replied';
+    var finalText=(kind==='wa_sent')?(it.querySelector('.draft')||{{value:''}}).value:'';
     ws.disabled=true; ws.textContent='saving…';
     try{{
       var r=await fetch('/api/leadflag',{{method:'POST',headers:{{'Content-Type':'application/json'}},
-        body:JSON.stringify({{lead_id:ws.dataset.lid,name:ws.dataset.name,kind:kind}})}});
+        body:JSON.stringify({{lead_id:ws.dataset.lid,name:ws.dataset.name,kind:kind,text:finalText}})}});
       if(!r.ok) throw 0;
       dism[it.dataset.key]=Date.now(); save(dism);
       it.style.display='none';

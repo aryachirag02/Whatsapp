@@ -112,7 +112,7 @@ export default {
           if (d.lead_id) {
             await env.FLAGS.put("lead:" + d.lead_id, JSON.stringify({
               name: (d.name || "").slice(0, 120), kind: (d.kind || "already_messaged").slice(0, 40),
-            reason: (d.reason || "").slice(0, 200),
+            reason: (d.reason || "").slice(0, 200), text: (d.text || "").slice(0, 1500),
               by: "chirag-host", ts: new Date().toISOString(),
             }));
             return new Response('{"ok":true}', { headers: { "Content-Type": "application/json" } });
@@ -201,7 +201,7 @@ export default {
             { status: 400, headers: { "Content-Type": "application/json" } });
           await env.FLAGS.put("lead:" + d.lead_id, JSON.stringify({
             name: (d.name || "").slice(0, 120), kind: (d.kind || "already_messaged").slice(0, 40),
-            reason: (d.reason || "").slice(0, 200),
+            reason: (d.reason || "").slice(0, 200), text: (d.text || "").slice(0, 1500),
             by: email, ts: new Date().toISOString(),
           }));
           return new Response(JSON.stringify({ ok: true }),
