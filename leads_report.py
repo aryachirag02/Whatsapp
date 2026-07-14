@@ -607,13 +607,14 @@ document.addEventListener('click',async function(e){{
     var links=[];
     try{{links=JSON.parse(sm.dataset.links||'[]');}}catch(e2){{}}
     if(links.length){{
-      body+='\n\nUseful resources:';
-      links.forEach(function(l){{ body+='\n- '+l[1]+': '+l[0]; }});
+      body+='\\n\\nUseful resources:';
+      links.forEach(function(l){{ body+='\\n- '+l[1]+': '+l[0]; }});
     }}
     var u='https://mail.google.com/mail/?view=cm&fs=1&to='+encodeURIComponent(sm.dataset.to)
          +'&su='+encodeURIComponent(sm.dataset.sub)
          +'&body='+encodeURIComponent(body);
-    window.open(u,'_blank');
+    var w=window.open(u,'_blank');
+    if(!w) location.href=u;   // popup blocked / home-screen app: open in place
     dism[it.dataset.key]=Date.now(); save(dism);   // acted -> gone on next reload
     return;
   }}
